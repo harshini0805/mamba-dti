@@ -1,5 +1,4 @@
-"""
-BiLSTM+MLP DTI Architecture
+# BiLSTM+MLP DTI Architecture
 
 ## Overview
 
