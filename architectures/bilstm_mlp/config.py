@@ -34,7 +34,7 @@ class BiLSTMMLPConfig:
     # ─── Training Hyperparameters ───────────────────────────────────────
     num_epochs: int = 200
     batch_size: int = 16
-    learning_rate: float = 1e-3  # BiLSTM typically uses higher LR than Transformers
+    learning_rate: float = 3e-4  # Same across all architectures for fair comparison
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
     dropout_rate: float = 0.3

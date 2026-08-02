@@ -11,10 +11,13 @@ Hyperparameters can be overridden via CLI.
 
 import argparse
 import copy
+import json
+import logging
 import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -22,6 +25,7 @@ from torch.utils.data import DataLoader
 # Add parent directories to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).parent))  # Add architecture config path
 
 from common.dataset_loader import DTIDataset, collate_fn
 from common.metrics import compute_metrics
@@ -109,15 +113,17 @@ def train_fold(
     fold: int,
     train_loader: DataLoader,
     val_loader: DataLoader,
+    test_loader: DataLoader,
     config_arch,
     config_data,
     checkpoint_dir: Path,
+    logger=None,
 ) -> dict:
     """
-    Train one fold of cross-validation.
+    Train one independent run and evaluate on test set.
 
     Returns:
-        best_val_metrics (dict)
+        dict with keys: val_{metric}, test_{metric} for all metrics
     """
     model = MambaMLPDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
     optimizer = torch.optim.Adam(
@@ -127,55 +133,106 @@ def train_fold(
     )
     criterion = nn.BCEWithLogitsLoss()
 
-    best_val_roc_auc = -1.0
+    best_val_pr_auc = -1.0
     best_val_metrics = None
     wait = 0
-
-    print(f"\n{'='*70}")
-    print(f"  Fold {fold} / {config_arch.num_folds}")
-    print(f"{'='*70}")
 
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loss, train_m = run_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_m = run_epoch(model, val_loader, criterion)
 
         # ─── Per-epoch table ───────────────────────────────────────────────
-        if epoch == 1:
-            header = f"  {'Metric':<16}  {'Train':>12}  {'Val':>12}"
-            sep = f"  {'─'*16}  {'─'*12}  {'─'*12}"
-            print(sep)
-            print(header)
-            print(sep)
+        sep = "  " + "─" * 50
+        print(sep)
+        print(f"  Epoch {epoch}")
+        print(sep)
 
-        if epoch % 5 == 0 or epoch == 1:  # Print every 5 epochs + first epoch
-            for key in config_arch.metric_keys:
-                label = key.replace("_", " ").title()
-                print(
-                    f"  {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
-                )
-            print(
-                f"  {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
-            )
-            print(sep)
+        header = f"  {'Metric':<16}  {'Train':>12}  {'Val':>12}"
+        header_sep = f"  {'─'*16}  {'─'*12}  {'─'*12}"
+        print(header_sep)
+        print(header)
+        print(header_sep)
 
-        # ─── Checkpoint & Early Stopping ────────────────────────────────
-        if val_m["roc_auc"] > best_val_roc_auc:
-            best_val_roc_auc = val_m["roc_auc"]
+        if logger:
+            logger.info(sep)
+            logger.info(f"Epoch {epoch}")
+            logger.info(sep)
+            logger.info(header_sep)
+            logger.info(header)
+            logger.info(header_sep)
+
+        # Print all metrics
+        for key in config_arch.metric_keys:
+            label = key.replace("_", " ").title()
+            line = f"  {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+            print(line)
+            if logger:
+                logger.info(line)
+
+        # Print loss
+        loss_line = f"  {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
+        print(loss_line)
+        print(sep)
+        if logger:
+            logger.info(loss_line)
+            logger.info(sep)
+
+        # ─── Checkpoint & Early Stopping (based on PR-AUC) ──────────────────
+        if val_m["pr_auc"] > best_val_pr_auc:
+            best_val_pr_auc = val_m["pr_auc"]
             best_val_metrics = copy.deepcopy(val_m)
-            checkpoint_path = checkpoint_dir / f"best_model_fold_{fold}.pt"
+            checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
             torch.save(model.state_dict(), checkpoint_path)
-            print(
-                f"  ✓ Saved {checkpoint_path.name} "
-                f"(ROC-AUC = {best_val_roc_auc:.4f})"
-            )
+            msg = f"  ✓ Epoch {epoch}: Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
+            print(msg)
+            if logger:
+                logger.info(msg)
             wait = 0
         else:
             wait += 1
             if wait >= config_arch.patience:
-                print(f"\n  Early stopping triggered at epoch {epoch}.")
+                msg = f"\n  Early stopping triggered at epoch {epoch}."
+                print(msg)
+                if logger:
+                    logger.info(msg)
                 break
 
-    return best_val_metrics
+    # ─── Evaluate on test set using best model ───────────────────────────
+    checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
+    if checkpoint_path.exists():
+        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+        print(f"\n  Evaluating best model on test set...")
+        test_loss, test_metrics = run_epoch(model, test_loader, criterion)
+
+        # Combine val and test metrics
+        combined_metrics = {}
+        if best_val_metrics:
+            for key in best_val_metrics.keys():
+                combined_metrics[f"val_{key}"] = best_val_metrics[key]
+        for key in test_metrics.keys():
+            combined_metrics[f"test_{key}"] = test_metrics[key]
+        combined_metrics["test_loss"] = test_loss
+
+        # Print test results
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+        print(f"  {'Metric':<16}  {'Val':>12}  {'Test':>12}")
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+        for key in config_arch.metric_keys:
+            val_key = f"val_{key}"
+            test_key = f"test_{key}"
+            if val_key in combined_metrics and test_key in combined_metrics:
+                print(
+                    f"  {key.replace('_', ' ').title():<16}  "
+                    f"{combined_metrics[val_key]:>12.4f}  "
+                    f"{combined_metrics[test_key]:>12.4f}"
+                )
+        print(f"  {'Loss':<16}  {combined_metrics.get('val_loss', 0):>12.4f}  {test_loss:>12.4f}")
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}\n")
+
+        return combined_metrics
+    else:
+        print(f"  Warning: Checkpoint not found at {checkpoint_path}")
+        return best_val_metrics if best_val_metrics else {}
 
 
 def main():
@@ -225,6 +282,15 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging to file
+    log_file = logs_dir / f"{args.dataset}_training.log"
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     print(f"\nTraining Mamba+MLP on {args.dataset}")
     print(f"Results dir: {results_dir}")
@@ -289,13 +355,24 @@ def main():
             num_workers=0,
         )
 
+        # Load test data
+        test_loader = DataLoader(
+            DTIDataset(test_df, protein_features, drug_embeddings),
+            batch_size=config.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=0,
+        )
+
         best_metrics = train_fold(
             fold=run_idx,
             train_loader=train_loader,
             val_loader=val_loader,
+            test_loader=test_loader,
             config_arch=config,
             config_data=config_data,
             checkpoint_dir=checkpoint_dir,
+            logger=logger,
         )
         run_summaries.append(best_metrics)
 
@@ -303,15 +380,69 @@ def main():
     print(f"\n{'='*70}")
     print("  Summary: 5 Runs with Different Seeds (Same Train/Val Split)")
     print(f"{'='*70}")
-    print(f"  {'Metric':<16}  {'Mean':>12}  {'Std':>12}")
-    print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+    print(f"  {'Metric':<16}  {'Val Mean':>12}  {'Val Std':>12}  {'Test Mean':>12}  {'Test Std':>12}")
+    print(f"  {'─'*16}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}")
+
+    # Save results to CSV
+    results_data = []
+    for run_idx, metrics in enumerate(run_summaries, start=1):
+        row = {"run": run_idx}
+        for key in config.metric_keys:
+            val_key = f"val_{key}"
+            test_key = f"test_{key}"
+            if val_key in metrics:
+                row[f"val_{key}"] = metrics[val_key]
+            if test_key in metrics:
+                row[f"test_{key}"] = metrics[test_key]
+        results_data.append(row)
+
+    # Compute and print summary statistics
     for key in config.metric_keys:
-        values = [s[key] for s in run_summaries]
+        val_values = [s.get(f"val_{key}", np.nan) for s in run_summaries]
+        test_values = [s.get(f"test_{key}", np.nan) for s in run_summaries]
         label = key.replace("_", " ").title()
+        val_mean = np.nanmean(val_values) if not np.all(np.isnan(val_values)) else 0.0
+        val_std = np.nanstd(val_values) if not np.all(np.isnan(val_values)) else 0.0
+        test_mean = np.nanmean(test_values) if not np.all(np.isnan(test_values)) else 0.0
+        test_std = np.nanstd(test_values) if not np.all(np.isnan(test_values)) else 0.0
         print(
-            f"  {label:<16}  {np.mean(values):>12.4f}  {np.std(values):>12.4f}"
+            f"  {label:<16}  {val_mean:>12.4f}  {val_std:>12.4f}  "
+            f"{test_mean:>12.4f}  {test_std:>12.4f}"
         )
-    print(f"  {'─'*16}  {'─'*12}  {'─'*12}\n")
+
+    print(f"  {'─'*16}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}\n")
+
+    # Save to CSV and JSON
+    results_csv_path = results_dir / "results.csv"
+    results_json_path = results_dir / "results.json"
+
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"  ✓ Saved results to {results_csv_path}")
+
+    # Also save summary statistics
+    summary_data = {
+        "dataset": args.dataset,
+        "num_runs": len(run_summaries),
+        "metrics": {}
+    }
+    for key in config.metric_keys:
+        val_values = [s.get(f"val_{key}", np.nan) for s in run_summaries]
+        test_values = [s.get(f"test_{key}", np.nan) for s in run_summaries]
+        summary_data["metrics"][key] = {
+            "val": {
+                "mean": float(np.nanmean(val_values)) if not np.all(np.isnan(val_values)) else None,
+                "std": float(np.nanstd(val_values)) if not np.all(np.isnan(val_values)) else None,
+            },
+            "test": {
+                "mean": float(np.nanmean(test_values)) if not np.all(np.isnan(test_values)) else None,
+                "std": float(np.nanstd(test_values)) if not np.all(np.isnan(test_values)) else None,
+            }
+        }
+
+    with open(results_json_path, "w") as f:
+        json.dump(summary_data, f, indent=2)
+    print(f"  ✓ Saved summary to {results_json_path}\n")
 
 
 if __name__ == "__main__":

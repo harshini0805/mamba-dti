@@ -1,20 +1,11 @@
-# Jupyter
-.ipynb_checkpoints/
-
-# Python
+data/
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 *.egg-info/
-.venv/
-venv/
-env/
-
-# OS
+.pytest_cache/
 .DS_Store
-Thumbs.db
-
-# Model / experiment artifacts
-*.pt
-*.pth
-*.ckpt
-wandb/
+*.log
+results/
+checkpoints/
+logs/
