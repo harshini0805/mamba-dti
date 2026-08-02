@@ -32,7 +32,7 @@ class BiLSTMMLPConfig:
     decoder_dropout: float = 0.3
 
     # ─── Training Hyperparameters ───────────────────────────────────────
-    num_epochs: int = 50
+    num_epochs: int = 200
     batch_size: int = 16
     learning_rate: float = 1e-3  # BiLSTM typically uses higher LR than Transformers
     weight_decay: float = 1e-4
@@ -49,7 +49,7 @@ class BiLSTMMLPConfig:
     # ─── Cross-Validation ───────────────────────────────────────────────
     num_folds: int = 5
     random_state: int = 42
-    patience: int = 5  # Early stopping patience
+    patience: int = 30  # Early stopping patience
 
     # ─── Loss & Metrics ──────────────────────────────────────────────────
     loss_fn: str = "bce_with_logits"  # Binary classification
