@@ -28,7 +28,9 @@ from pathlib import Path
 # then set DATASET below and run 01 -> 02 -> 03 -> 04 -> train.py in order.
 # =============================================================================
 
-DATASET = "human_random"
+import os
+
+DATASET = os.getenv("DTI_DATASET", "human_random")
 
 # =============================================================================
 # PATHS (all derived from DATASET — do not hardcode a dataset name below here)
