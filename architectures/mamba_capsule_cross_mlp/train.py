@@ -1,17 +1,12 @@
 """
-Training script for BiLSTM+MLP DTI architecture.
+Training script for MambaCapsuleCross DTI architecture.
 
 Usage:
     python train.py --dataset bindingdb
-    python train.py --dataset humans --epochs 100 --batch_size 32
-    python train.py --dataset biosnap --lr 5e-4
+    python train.py --dataset humans --epochs 100 --batch_size 32 --lr 1e-4
 
 All config is loaded from datasets/{dataset}.py and this module's config.py.
 Hyperparameters can be overridden via CLI.
-
-Key difference from Mamba version:
-  - Includes ReduceLROnPlateau scheduler for LSTM stability
-  - Slightly different default hyperparameters optimized for BiLSTM
 """
 
 import argparse
@@ -30,14 +25,13 @@ from torch.utils.data import DataLoader
 # Add parent directories to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(Path(__file__).parent))  # Add architecture config path
+sys.path.insert(0, str(Path(__file__).parent))
 
 from common.dataset_loader import DTIDataset, collate_fn
 from common.metrics import compute_metrics
 from config import default_config as arch_config
-from model import BiLSTMDTI
+from model import MambaCapsuleCrossDTI
 
-# Import dataset config dynamically
 def load_dataset_config(dataset_name: str):
     """Dynamically import dataset config."""
     try:
@@ -53,8 +47,6 @@ def load_dataset_config(dataset_name: str):
         ) from e
 
 
-# ─── Device & Loss ─────────────────────────────────────────────────────────
-
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
@@ -65,18 +57,7 @@ def run_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[float, dict]:
-    """
-    Run one epoch of training or validation.
-
-    Args:
-        model: DTI model
-        loader: Data loader
-        criterion: Loss function
-        optimizer: Optimizer (None for validation/eval)
-
-    Returns:
-        (epoch_loss, metrics_dict)
-    """
+    """Run one epoch of training or validation."""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -95,7 +76,6 @@ def run_epoch(
             logits = model(protein, drug)
             loss = criterion(logits, label)
 
-            # Detect NaN/Inf with diagnostics
             if torch.isnan(loss) or torch.isinf(loss):
                 raise ValueError(
                     f"{'NaN' if torch.isnan(loss) else 'Inf'} loss at batch {batch_idx}.\n"
@@ -133,22 +113,19 @@ def train_fold(
     checkpoint_dir: Path,
     logger=None,
 ) -> dict:
-    """
-    Train one independent run and evaluate on test set.
-
-    Includes ReduceLROnPlateau scheduler for BiLSTM stability.
-
-    Returns:
-        dict with keys: val_{metric}, test_{metric} for all metrics
-    """
-    model = BiLSTMDTI(
-        drug_input_dim=config_data.drug_input_dim,
-        d_model=config_arch.bilstm_d_model,
-        num_layers=config_arch.bilstm_num_layers,
-        lstm_dropout=config_arch.bilstm_dropout,
-        embed_dim=config_arch.protein_embedding_dim,
-        decoder_hidden=config_arch.decoder_hidden_dim,
-        decoder_dropout=config_arch.decoder_dropout,
+    """Train one independent run and evaluate on test set."""
+    model = MambaCapsuleCrossDTI(
+        drug_in_dim=config_data.drug_input_dim,
+        d_model=config_arch.d_model,
+        drug_proj_dim=config_arch.drug_proj_dim,
+        num_caps=config_arch.num_caps,
+        cap_dim=config_arch.cap_dim,
+        out_caps=config_arch.out_caps,
+        out_cap_dim=config_arch.out_cap_dim,
+        embed_dim=config_arch.embed_dim,
+        routing_iters=config_arch.routing_iters,
+        num_heads=config_arch.num_heads,
+        attn_dropout=config_arch.attn_dropout,
     ).to(DEVICE)
 
     optimizer = torch.optim.Adam(
@@ -156,31 +133,17 @@ def train_fold(
         lr=config_arch.learning_rate,
         weight_decay=config_arch.weight_decay,
     )
-
-    # ReduceLROnPlateau scheduler for LSTM stability
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=config_arch.plateau_factor,
-        patience=config_arch.plateau_patience,
-        verbose=config_arch.plateau_verbose,
-    )
-
     criterion = nn.BCEWithLogitsLoss()
 
     best_val_pr_auc = -1.0
-    best_val_loss = None
     best_val_metrics = None
+    best_val_loss = None
     wait = 0
 
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loss, train_m = run_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_m = run_epoch(model, val_loader, criterion)
 
-        # Step scheduler on validation PR-AUC
-        scheduler.step(val_m["pr_auc"])
-
-        # ─── Per-epoch table ───────────────────────────────────────────────
         sep = "  " + "─" * 50
         print(sep)
         print(f"  Epoch {epoch}")
@@ -200,7 +163,6 @@ def train_fold(
             logger.info(header)
             logger.info(header_sep)
 
-        # Print all metrics
         for key in config_arch.metric_keys:
             label = key.replace("_", " ").title()
             line = f"  {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
@@ -208,7 +170,6 @@ def train_fold(
             if logger:
                 logger.info(line)
 
-        # Print loss
         loss_line = f"  {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
         print(loss_line)
         print(sep)
@@ -216,14 +177,13 @@ def train_fold(
             logger.info(loss_line)
             logger.info(sep)
 
-        # ─── Checkpoint & Early Stopping (based on PR-AUC) ──────────────────
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc = val_m["pr_auc"]
             best_val_metrics = copy.deepcopy(val_m)
             best_val_loss = val_loss
             checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
             torch.save(model.state_dict(), checkpoint_path)
-            msg = f"  ✓ Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
+            msg = f"  ✓ Epoch {epoch}: Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
             print(msg)
             if logger:
                 logger.info(msg)
@@ -237,25 +197,22 @@ def train_fold(
                     logger.info(msg)
                 break
 
-    # ─── Evaluate on test set using best model ───────────────────────────
     checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
     if checkpoint_path.exists():
         model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
         print(f"\n  Evaluating best model on test set...")
         test_loss, test_metrics = run_epoch(model, test_loader, criterion)
 
-        # Combine val and test metrics
         combined_metrics = {}
         if best_val_metrics:
             for key in best_val_metrics.keys():
                 combined_metrics[f"val_{key}"] = best_val_metrics[key]
         for key in test_metrics.keys():
             combined_metrics[f"test_{key}"] = test_metrics[key]
-        combined_metrics["test_loss"] = test_loss
         if best_val_loss is not None:
             combined_metrics["val_loss"] = best_val_loss
+        combined_metrics["test_loss"] = test_loss
 
-        # Print test results
         print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
         print(f"  {'Metric':<16}  {'Val':>12}  {'Test':>12}")
         print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
@@ -279,37 +236,18 @@ def train_fold(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train BiLSTM+MLP DTI model on specified dataset."
+        description="Train MambaCapsuleCross DTI model on specified dataset."
     )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        help="Dataset name (e.g., 'bindingdb', 'humans')",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        help="Override number of epochs",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        help="Override batch size",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        help="Override learning rate",
-    )
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name")
+    parser.add_argument("--epochs", type=int, help="Override number of epochs")
+    parser.add_argument("--batch_size", type=int, help="Override batch size")
+    parser.add_argument("--lr", type=float, help="Override learning rate")
 
     args = parser.parse_args()
 
-    # Load configs
     config_data = load_dataset_config(args.dataset)
     config = arch_config
 
-    # Override with CLI arguments
     if args.epochs:
         config.num_epochs = args.epochs
     if args.batch_size:
@@ -317,7 +255,6 @@ def main():
     if args.lr:
         config.learning_rate = args.lr
 
-    # Create output directories
     results_dir = config.results_dir / args.dataset
     logs_dir = config.logs_dir / args.dataset
     checkpoint_dir = config.checkpoints_dir / args.dataset
@@ -325,7 +262,6 @@ def main():
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Setup logging to file
     log_file = logs_dir / f"{args.dataset}_training.log"
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
@@ -334,12 +270,11 @@ def main():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-    print(f"\nTraining BiLSTM+MLP on {args.dataset}")
+    print(f"\nTraining MambaCapsuleCross on {args.dataset}")
     print(f"Results dir: {results_dir}")
     print(f"Logs dir: {logs_dir}")
     print(f"Checkpoint dir: {checkpoint_dir}")
 
-    # Load data (pre-split into train/valid/test)
     print(f"\nLoading data from {config_data.data_dir}...")
     protein_features, drug_embeddings, train_df, val_df, test_df = config_data.load_data()
 
@@ -350,23 +285,17 @@ def main():
     print(f"  Valid: {len(val_df):,} interactions")
     print(f"  Test:  {len(test_df):,} interactions")
 
-    # Verify drug fingerprint dimension
     sample_drug_id = next(iter(drug_embeddings.keys()))
     fingerprint_dim = len(drug_embeddings[sample_drug_id])
     if fingerprint_dim != config_data.drug_input_dim:
-        print(
-            f"Warning: Expected fingerprint dim {config_data.drug_input_dim}, "
-            f"got {fingerprint_dim}"
-        )
+        print(f"Warning: Expected fingerprint dim {config_data.drug_input_dim}, got {fingerprint_dim}")
         config_data.drug_input_dim = fingerprint_dim
 
-    # Print model info
-    model_info = BiLSTMDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
+    model_info = MambaCapsuleCrossDTI(drug_in_dim=config_data.drug_input_dim).to(DEVICE)
     num_params = sum(p.numel() for p in model_info.parameters() if p.requires_grad)
     print(f"\nTrainable parameters: {num_params:,}")
     del model_info
 
-    # 5 random seeds, 5 independent runs (same train/valid split, different model init)
     SEEDS = [42, 123, 2024, 456, 789]
     run_summaries = []
 
@@ -375,13 +304,11 @@ def main():
         print(f"  Run {run_idx}/5 (seed={seed})")
         print(f"{'='*70}")
 
-        # Set random seeds for reproducibility
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
-        # Use same pre-split train/valid data
         train_loader = DataLoader(
             DTIDataset(train_df, protein_features, drug_embeddings),
             batch_size=config.batch_size,
@@ -397,7 +324,6 @@ def main():
             num_workers=0,
         )
 
-        # Load test data
         test_loader = DataLoader(
             DTIDataset(test_df, protein_features, drug_embeddings),
             batch_size=config.batch_size,
@@ -418,14 +344,12 @@ def main():
         )
         run_summaries.append(best_metrics)
 
-    # Final summary across 5 runs
     print(f"\n{'='*70}")
     print("  Summary: 5 Runs with Different Seeds (Same Train/Val Split)")
     print(f"{'='*70}")
     print(f"  {'Metric':<16}  {'Val Mean':>12}  {'Val Std':>12}  {'Test Mean':>12}  {'Test Std':>12}")
     print(f"  {'─'*16}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}")
 
-    # Save results to CSV
     results_data = []
     for run_idx, metrics in enumerate(run_summaries, start=1):
         row = {"run": run_idx}
@@ -438,7 +362,6 @@ def main():
                 row[f"test_{key}"] = metrics[test_key]
         results_data.append(row)
 
-    # Compute and print summary statistics
     for key in config.metric_keys:
         val_values = [s.get(f"val_{key}", np.nan) for s in run_summaries]
         test_values = [s.get(f"test_{key}", np.nan) for s in run_summaries]
@@ -454,7 +377,6 @@ def main():
 
     print(f"  {'─'*16}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}\n")
 
-    # Save to CSV and JSON
     results_csv_path = results_dir / "results.csv"
     results_json_path = results_dir / "results.json"
 
@@ -462,7 +384,6 @@ def main():
     results_df.to_csv(results_csv_path, index=False)
     print(f"  ✓ Saved results to {results_csv_path}")
 
-    # Also save summary statistics
     summary_data = {
         "dataset": args.dataset,
         "num_runs": len(run_summaries),

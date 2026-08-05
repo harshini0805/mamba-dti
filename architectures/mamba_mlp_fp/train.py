@@ -135,6 +135,7 @@ def train_fold(
 
     best_val_pr_auc = -1.0
     best_val_metrics = None
+    best_val_loss = None
     wait = 0
 
     for epoch in range(1, config_arch.num_epochs + 1):
@@ -181,6 +182,7 @@ def train_fold(
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc = val_m["pr_auc"]
             best_val_metrics = copy.deepcopy(val_m)
+            best_val_loss = val_loss
             checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
             torch.save(model.state_dict(), checkpoint_path)
             msg = f"  ✓ Epoch {epoch}: Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
@@ -211,6 +213,8 @@ def train_fold(
                 combined_metrics[f"val_{key}"] = best_val_metrics[key]
         for key in test_metrics.keys():
             combined_metrics[f"test_{key}"] = test_metrics[key]
+        if best_val_loss is not None:
+            combined_metrics["val_loss"] = best_val_loss
         combined_metrics["test_loss"] = test_loss
 
         # Print test results
@@ -226,7 +230,7 @@ def train_fold(
                     f"{combined_metrics[val_key]:>12.4f}  "
                     f"{combined_metrics[test_key]:>12.4f}"
                 )
-        print(f"  {'Loss':<16}  {combined_metrics.get('val_loss', 0):>12.4f}  {test_loss:>12.4f}")
+        print(f"  {'Loss':<16}  {combined_metrics.get('val_loss', 'N/A'):>12}  {test_loss:>12.4f}")
         print(f"  {'─'*16}  {'─'*12}  {'─'*12}\n")
 
         return combined_metrics

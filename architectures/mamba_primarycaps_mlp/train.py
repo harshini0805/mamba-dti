@@ -1,17 +1,12 @@
 """
-Training script for BiLSTM+MLP DTI architecture.
+Training script for Mamba+PrimaryCaps+MLP DTI architecture.
 
 Usage:
     python train.py --dataset bindingdb
-    python train.py --dataset humans --epochs 100 --batch_size 32
-    python train.py --dataset biosnap --lr 5e-4
+    python train.py --dataset humans --epochs 100 --batch_size 32 --lr 1e-4
 
 All config is loaded from datasets/{dataset}.py and this module's config.py.
 Hyperparameters can be overridden via CLI.
-
-Key difference from Mamba version:
-  - Includes ReduceLROnPlateau scheduler for LSTM stability
-  - Slightly different default hyperparameters optimized for BiLSTM
 """
 
 import argparse
@@ -35,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))  # Add architecture config path
 from common.dataset_loader import DTIDataset, collate_fn
 from common.metrics import compute_metrics
 from config import default_config as arch_config
-from model import BiLSTMDTI
+from model import MambaPrimaryCapsMLPDTI
 
 # Import dataset config dynamically
 def load_dataset_config(dataset_name: str):
@@ -95,7 +90,6 @@ def run_epoch(
             logits = model(protein, drug)
             loss = criterion(logits, label)
 
-            # Detect NaN/Inf with diagnostics
             if torch.isnan(loss) or torch.isinf(loss):
                 raise ValueError(
                     f"{'NaN' if torch.isnan(loss) else 'Inf'} loss at batch {batch_idx}.\n"
@@ -136,49 +130,26 @@ def train_fold(
     """
     Train one independent run and evaluate on test set.
 
-    Includes ReduceLROnPlateau scheduler for BiLSTM stability.
-
     Returns:
         dict with keys: val_{metric}, test_{metric} for all metrics
     """
-    model = BiLSTMDTI(
-        drug_input_dim=config_data.drug_input_dim,
-        d_model=config_arch.bilstm_d_model,
-        num_layers=config_arch.bilstm_num_layers,
-        lstm_dropout=config_arch.bilstm_dropout,
-        embed_dim=config_arch.protein_embedding_dim,
-        decoder_hidden=config_arch.decoder_hidden_dim,
-        decoder_dropout=config_arch.decoder_dropout,
-    ).to(DEVICE)
+    model = MambaPrimaryCapsMLPDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config_arch.learning_rate,
         weight_decay=config_arch.weight_decay,
     )
-
-    # ReduceLROnPlateau scheduler for LSTM stability
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=config_arch.plateau_factor,
-        patience=config_arch.plateau_patience,
-        verbose=config_arch.plateau_verbose,
-    )
-
     criterion = nn.BCEWithLogitsLoss()
 
     best_val_pr_auc = -1.0
-    best_val_loss = None
     best_val_metrics = None
+    best_val_loss = None
     wait = 0
 
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loss, train_m = run_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_m = run_epoch(model, val_loader, criterion)
-
-        # Step scheduler on validation PR-AUC
-        scheduler.step(val_m["pr_auc"])
 
         # ─── Per-epoch table ───────────────────────────────────────────────
         sep = "  " + "─" * 50
@@ -223,7 +194,7 @@ def train_fold(
             best_val_loss = val_loss
             checkpoint_path = checkpoint_dir / f"best_model_run_{fold}.pt"
             torch.save(model.state_dict(), checkpoint_path)
-            msg = f"  ✓ Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
+            msg = f"  ✓ Epoch {epoch}: Saved {checkpoint_path.name} (PR-AUC = {best_val_pr_auc:.4f})"
             print(msg)
             if logger:
                 logger.info(msg)
@@ -251,9 +222,9 @@ def train_fold(
                 combined_metrics[f"val_{key}"] = best_val_metrics[key]
         for key in test_metrics.keys():
             combined_metrics[f"test_{key}"] = test_metrics[key]
-        combined_metrics["test_loss"] = test_loss
         if best_val_loss is not None:
             combined_metrics["val_loss"] = best_val_loss
+        combined_metrics["test_loss"] = test_loss
 
         # Print test results
         print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
@@ -279,7 +250,7 @@ def train_fold(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train BiLSTM+MLP DTI model on specified dataset."
+        description="Train Mamba+PrimaryCaps+MLP DTI model on specified dataset."
     )
     parser.add_argument(
         "--dataset",
@@ -334,7 +305,7 @@ def main():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-    print(f"\nTraining BiLSTM+MLP on {args.dataset}")
+    print(f"\nTraining Mamba+PrimaryCaps+MLP on {args.dataset}")
     print(f"Results dir: {results_dir}")
     print(f"Logs dir: {logs_dir}")
     print(f"Checkpoint dir: {checkpoint_dir}")
@@ -361,12 +332,12 @@ def main():
         config_data.drug_input_dim = fingerprint_dim
 
     # Print model info
-    model_info = BiLSTMDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
+    model_info = MambaPrimaryCapsMLPDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
     num_params = sum(p.numel() for p in model_info.parameters() if p.requires_grad)
     print(f"\nTrainable parameters: {num_params:,}")
     del model_info
 
-    # 5 random seeds, 5 independent runs (same train/valid split, different model init)
+    # 5 random seeds, 5 independent runs
     SEEDS = [42, 123, 2024, 456, 789]
     run_summaries = []
 
