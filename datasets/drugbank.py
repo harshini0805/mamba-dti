@@ -38,10 +38,16 @@ class DrugBankDatasetConfig:
               - drug_embeddings: dict[smiles -> (2048,) float32]
               - interactions_df: DataFrame with ['protein_id', 'drug_id', 'label']
         """
+        # Convert relative paths to absolute (relative to project root)
+        from pathlib import Path as PathlibPath
+        project_root = PathlibPath(__file__).parent.parent
+        protein_csv = project_root / self.protein_csv
+        drug_npz = project_root / self.drug_npz
+        raw_interactions = project_root / self.raw_interactions
         print(f"Loading {self.dataset_name} dataset...")
 
         # ─── Load protein features ───────────────────────────────────────
-        protein_df = pd.read_csv(self.protein_csv)
+        protein_df = pd.read_csv(protein_csv)
         protein_features = {}
 
         # Columns are: protein_id, 0, 1, 2, ..., 219 (220 feature columns)
@@ -61,8 +67,8 @@ class DrugBankDatasetConfig:
         print(f"  ✓ Loaded {len(protein_features):,} protein features")
 
         # ─── Load drug fingerprints ─────────────────────────────────────
-        fp_data = np.load(self.drug_npz, allow_pickle=True)
-        manifest_df = pd.read_csv(Path(self.drug_npz).parent / "drugbank_morgan_manifest.csv")
+        fp_data = np.load(drug_npz, allow_pickle=True)
+        manifest_df = pd.read_csv(drug_npz.parent / "drugbank_morgan_manifest.csv")
         fingerprints = fp_data["fingerprints"].astype(np.float32) if "fingerprints" in fp_data else fp_data["fps"].astype(np.float32)
 
         drug_embeddings = {}
@@ -74,7 +80,7 @@ class DrugBankDatasetConfig:
         print(f"  ✓ Loaded {len(drug_embeddings):,} drug fingerprints (dim={self.drug_input_dim})")
 
         # ─── Load interaction pairs ──────────────────────────────────────
-        raw_df = pd.read_csv(self.raw_interactions)
+        raw_df = pd.read_csv(raw_interactions)
 
         interactions = pd.DataFrame({
             "protein_id": raw_df["protein_id"],
