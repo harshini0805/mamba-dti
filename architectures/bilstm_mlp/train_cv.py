@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common.dataset_loader import DTIDataset, collate_fn
 from common.metrics import compute_metrics
 from config import default_config as arch_config
-from model import BiLSTMMLPDTI
+from model import BiLSTMDTI
 
 def load_dataset_config(dataset_name: str):
     try:
@@ -59,7 +59,7 @@ def run_epoch(model, loader, criterion, optimizer=None):
     return epoch_loss, metrics
 
 def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config_arch, config_data, checkpoint_dir):
-    model = BiLSTMMLPDTI(drug_in_dim=config_data.drug_input_dim).to(DEVICE)
+    model = BiLSTMDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config_arch.learning_rate, weight_decay=config_arch.weight_decay)
     criterion = nn.BCEWithLogitsLoss()
     best_val_pr_auc, best_val_metrics, best_val_loss, wait = -1.0, None, None, 0
@@ -123,7 +123,7 @@ def main():
     if args.epochs: config.num_epochs = args.epochs
     if args.batch_size: config.batch_size = args.batch_size
     if args.lr: config.learning_rate = args.lr
-    results_dir, checkpoint_dir = Path("results") / args.dataset, Path("checkpoints") / args.dataset
+    results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nLoading {args.dataset} dataset for 5-fold CV...")
@@ -160,9 +160,8 @@ def main():
     for metric_key in metric_keys:
         all_vals = []
         for row in results_data:
-            key = metric_key.replace("val_", "")
-            if key in row:
-                all_vals.append(row[key])
+            if metric_key in row:
+                all_vals.append(row[metric_key])
         if all_vals:
             summary_metrics[metric_key] = {"mean": float(np.mean(all_vals)), "std": float(np.std(all_vals))}
             print(f"  {metric_key:<20}: {np.mean(all_vals):.4f} ± {np.std(all_vals):.4f}")

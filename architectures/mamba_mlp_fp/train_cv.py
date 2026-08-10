@@ -206,8 +206,8 @@ def main():
     if args.lr:
         config.learning_rate = args.lr
 
-    results_dir = Path("results") / args.dataset
-    checkpoint_dir = Path("checkpoints") / args.dataset
+    results_dir = config.results_dir / args.dataset
+    checkpoint_dir = config.checkpoints_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -274,9 +274,8 @@ def main():
     for metric_key in metric_keys:
         all_vals = []
         for row in results_data:
-            key = metric_key.replace("val_", "")
-            if key in row:
-                all_vals.append(row[key])
+            if metric_key in row:
+                all_vals.append(row[metric_key])
 
         if all_vals:
             summary_metrics[metric_key] = {

@@ -88,7 +88,7 @@ def main():
     if args.epochs: config.num_epochs = args.epochs
     if args.batch_size: config.batch_size = args.batch_size
     if args.lr: config.learning_rate = args.lr
-    results_dir, checkpoint_dir = Path("results") / args.dataset, Path("checkpoints") / args.dataset
+    results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     protein_features, drug_embeddings, interactions = config_data.load_data()
@@ -118,7 +118,7 @@ def main():
     summary_metrics = {}
     metric_keys = ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]
     for metric_key in metric_keys:
-        all_vals = [row[metric_key.replace("val_", "")] for row in results_data if metric_key.replace("val_", "") in row]
+        all_vals = [row[metric_key] for row in results_data if metric_key in row]
         if all_vals:
             summary_metrics[metric_key] = {"mean": float(np.mean(all_vals)), "std": float(np.std(all_vals))}
             print(f"  {metric_key:<20}: {np.mean(all_vals):.4f} ± {np.std(all_vals):.4f}")

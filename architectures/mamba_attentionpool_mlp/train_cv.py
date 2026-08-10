@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common.dataset_loader import DTIDataset, collate_fn
 from common.metrics import compute_metrics
 from config import default_config as arch_config
-from model import MambaAttentionPoolMLPDTI
+from model import MambaAttnDTI
 def load_dataset_config(dataset_name: str):
     try: return __import__(f"datasets.{dataset_name}", fromlist=["config"]).config
     except ImportError as e: raise ValueError(f"Dataset '{dataset_name}' not found.") from e
@@ -36,7 +36,7 @@ def run_epoch(model, loader, criterion, optimizer=None):
             all_labels.extend(label.cpu().numpy().tolist())
     return total_loss / len(loader.dataset), compute_metrics(all_labels, all_probs)
 def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config_arch, config_data, checkpoint_dir):
-    model = MambaAttentionPoolMLPDTI(drug_in_dim=config_data.drug_input_dim).to(DEVICE)
+    model = MambaAttnDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config_arch.learning_rate, weight_decay=config_arch.weight_decay)
     best_val_pr_auc, best_val_metrics, best_val_loss, wait = -1.0, None, None, 0
     for epoch in range(1, config_arch.num_epochs + 1):
@@ -86,7 +86,7 @@ def main():
         val = getattr(args, attr.split("_")[0], None) if attr != "num_epochs" else args.epochs
         if val: setattr(config, attr, val)
     config_data = load_dataset_config(args.dataset)
-    results_dir, checkpoint_dir = Path("results") / args.dataset, Path("checkpoints") / args.dataset
+    results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     protein_features, drug_embeddings, interactions = config_data.load_data()
@@ -116,7 +116,7 @@ def main():
     summary_metrics = {}
     metric_keys = ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]
     for metric_key in metric_keys:
-        all_vals = [row[metric_key.replace("val_", "")] for row in results_data if metric_key.replace("val_", "") in row]
+        all_vals = [row[metric_key] for row in results_data if metric_key in row]
         if all_vals:
             summary_metrics[metric_key] = {"mean": float(np.mean(all_vals)), "std": float(np.std(all_vals))}
             print(f"  {metric_key:<20}: {np.mean(all_vals):.4f} ± {np.std(all_vals):.4f}")
