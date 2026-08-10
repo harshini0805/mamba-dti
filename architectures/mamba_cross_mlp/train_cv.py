@@ -47,9 +47,31 @@ def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loader = DataLoader(DTIDataset(train_df, protein_features, drug_embeddings), batch_size=config_arch.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
         val_loader = DataLoader(DTIDataset(val_df, protein_features, drug_embeddings), batch_size=config_arch.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
-        train_loss, _ = run_epoch(model, train_loader, criterion, optimizer)
+        train_loss, train_m = run_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_m = run_epoch(model, val_loader, criterion)
-        if epoch % 10 == 0: print(f"  Fold {fold} | Epoch {epoch:3d} | Val Loss: {val_loss:.4f} | Val PR-AUC: {val_m['pr_auc']:.4f}")
+
+        # ─── Per-epoch table ───────────────────────────────────────────────
+        sep = "    " + "─" * 50
+        print(sep)
+        print(f"    Fold {fold} | Epoch {epoch}")
+        print(sep)
+
+        header = f"    {'Metric':<16}  {'Train':>12}  {'Val':>12}"
+        header_sep = f"    {'─'*16}  {'─'*12}  {'─'*12}"
+        print(header_sep)
+        print(header)
+        print(header_sep)
+
+        # Print all metrics
+        for key in arch_config.metric_keys:
+            label = key.replace("_", " ").title()
+            line = f"    {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+            print(line)
+
+        # Print loss
+        loss_line = f"    {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
+        print(loss_line)
+        print(sep)
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc, best_val_metrics, best_val_loss = val_m["pr_auc"], copy.deepcopy(val_m), val_loss
             torch.save(model.state_dict(), checkpoint_dir / f"best_model_fold_{fold}.pt")
@@ -93,9 +115,48 @@ def main():
             fold_metrics = train_fold(fold_idx, train_df, val_df, protein_features, drug_embeddings, config, config_data, checkpoint_dir)
             fold_results.append(fold_metrics)
         all_results.append(fold_results)
-    print(f"\n{'='*70}\n  SUMMARY\n{'='*70}")
-    for metric_key in ["val_pr_auc", "val_roc_auc", "val_accuracy"]:
-        vals = [fm[metric_key.replace("val_", "")] for cr in all_results for fm in cr if metric_key.replace("val_", "") in fm]
-        if vals: print(f"  {metric_key:<20}: {np.mean(vals):.4f} ± {np.std(vals):.4f}")
-    with open(results_dir / "cv_summary.json", "w") as f: json.dump({}, f)
+    print(f"\n{'='*70}\n  SUMMARY: 3 CV Runs × 5 Folds\n{'='*70}")
+    # Build per-fold results table
+    results_data = []
+    for seed_idx, cv_seed in enumerate(CV_SEEDS, start=1):
+        cv_fold_results = all_results[seed_idx - 1]
+        for fold_idx, fold_metrics in enumerate(cv_fold_results, start=1):
+            row = {"seed": cv_seed, "fold": fold_idx}
+            for key, val in fold_metrics.items():
+                row[key] = val
+            results_data.append(row)
+    # Compute summary statistics
+    summary_metrics = {}
+    metric_keys = ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]
+    for metric_key in metric_keys:
+        all_vals = []
+        for row in results_data:
+            key = metric_key.replace("val_", "")
+            if key in row:
+                all_vals.append(row[key])
+        if all_vals:
+            summary_metrics[metric_key] = {"mean": float(np.mean(all_vals)), "std": float(np.std(all_vals))}
+            print(f"  {metric_key:<20}: {np.mean(all_vals):.4f} ± {np.std(all_vals):.4f}")
+    # Save results to CSV
+    results_csv_path = results_dir / "results.csv"
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"\n  ✓ Saved fold results to {results_csv_path}")
+    # Save summary statistics to JSON
+    summary_data = {
+        "dataset": args.dataset,
+        "num_seeds": len(CV_SEEDS),
+        "num_folds": 5,
+        "total_folds": len(results_data),
+        "metrics": summary_metrics
+    }
+    results_json_path = results_dir / "results.json"
+    with open(results_json_path, "w") as f:
+        json.dump(summary_data, f, indent=2)
+    print(f"  ✓ Saved summary to {results_json_path}")
+    # Also save detailed CV summary (per seed)
+    cv_summary_file = results_dir / "cv_summary.json"
+    with open(cv_summary_file, "w") as f:
+        json.dump(summary_metrics, f, indent=2)
+    print(f"  ✓ Saved CV summary to {cv_summary_file}")
 if __name__ == "__main__": main()

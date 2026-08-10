@@ -103,7 +103,7 @@ def train_fold(
     checkpoint_dir: Path,
 ) -> dict:
     """Train one fold and evaluate on validation set."""
-    model = MambaMLPDTI(drug_in_dim=config_data.drug_input_dim).to(DEVICE)
+    model = MambaMLPDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -136,8 +136,28 @@ def train_fold(
         train_loss, train_m = run_epoch(model, train_loader, criterion, optimizer)
         val_loss, val_m = run_epoch(model, val_loader, criterion)
 
-        if epoch % 10 == 0:
-            print(f"  Fold {fold} | Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val PR-AUC: {val_m['pr_auc']:.4f}")
+        # ─── Per-epoch table ───────────────────────────────────────────────
+        sep = "    " + "─" * 50
+        print(sep)
+        print(f"    Fold {fold} | Epoch {epoch}")
+        print(sep)
+
+        header = f"    {'Metric':<16}  {'Train':>12}  {'Val':>12}"
+        header_sep = f"    {'─'*16}  {'─'*12}  {'─'*12}"
+        print(header_sep)
+        print(header)
+        print(header_sep)
+
+        # Print all metrics
+        for key in arch_config.metric_keys:
+            label = key.replace("_", " ").title()
+            line = f"    {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+            print(line)
+
+        # Print loss
+        loss_line = f"    {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
+        print(loss_line)
+        print(sep)
 
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc = val_m["pr_auc"]
@@ -237,14 +257,26 @@ def main():
     print("  SUMMARY: 3 CV Runs × 5 Folds")
     print(f"{'='*70}")
 
+    # Build per-fold results table
+    results_data = []
+    for seed_idx, cv_seed in enumerate(CV_SEEDS, start=1):
+        cv_fold_results = all_results[seed_idx - 1]
+        for fold_idx, fold_metrics in enumerate(cv_fold_results, start=1):
+            row = {"seed": cv_seed, "fold": fold_idx}
+            for key, val in fold_metrics.items():
+                row[key] = val
+            results_data.append(row)
+
+    # Compute summary statistics
     summary_metrics = {}
-    for metric_key in ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]:
+    metric_keys = ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]
+
+    for metric_key in metric_keys:
         all_vals = []
-        for cv_results in all_results:
-            for fold_metrics in cv_results:
-                key = metric_key.replace("val_", "")
-                if key in fold_metrics:
-                    all_vals.append(fold_metrics[key])
+        for row in results_data:
+            key = metric_key.replace("val_", "")
+            if key in row:
+                all_vals.append(row[key])
 
         if all_vals:
             summary_metrics[metric_key] = {
@@ -253,11 +285,31 @@ def main():
             }
             print(f"  {metric_key:<20}: {np.mean(all_vals):.4f} ± {np.std(all_vals):.4f}")
 
-    # Save summary
-    summary_file = results_dir / "cv_summary.json"
-    with open(summary_file, "w") as f:
+    # Save results to CSV
+    results_csv_path = results_dir / "results.csv"
+    results_df = pd.DataFrame(results_data)
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"\n  ✓ Saved fold results to {results_csv_path}")
+
+    # Save summary statistics to JSON
+    summary_data = {
+        "dataset": args.dataset,
+        "num_seeds": len(CV_SEEDS),
+        "num_folds": 5,
+        "total_folds": len(results_data),
+        "metrics": summary_metrics
+    }
+
+    results_json_path = results_dir / "results.json"
+    with open(results_json_path, "w") as f:
+        json.dump(summary_data, f, indent=2)
+    print(f"  ✓ Saved summary to {results_json_path}")
+
+    # Also save detailed CV summary (per seed)
+    cv_summary_file = results_dir / "cv_summary.json"
+    with open(cv_summary_file, "w") as f:
         json.dump(summary_metrics, f, indent=2)
-    print(f"\n  ✓ Summary saved: {summary_file}")
+    print(f"  ✓ Saved CV summary to {cv_summary_file}")
 
 
 if __name__ == "__main__":

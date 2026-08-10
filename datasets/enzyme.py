@@ -34,7 +34,7 @@ class EnzymeDatasetConfig:
 
         Returns:
             (protein_features, drug_embeddings, interactions_df)
-              - protein_features: dict[protein_sequence -> (220,) float32]
+              - protein_features: dict[protein_id -> (220,) float32]
               - drug_embeddings: dict[smiles -> (2048,) float32]
               - interactions_df: DataFrame with ['protein_id', 'drug_id', 'label']
         """
@@ -44,11 +44,12 @@ class EnzymeDatasetConfig:
         protein_df = pd.read_csv(self.protein_csv)
         protein_features = {}
 
-        feature_cols = [col for col in protein_df.columns if col.startswith('f_')]
+        # Columns are: protein_id, 0, 1, 2, ..., 219 (220 feature columns)
+        feature_cols = [col for col in protein_df.columns if col not in ['protein_id']]
         for _, row in protein_df.iterrows():
-            sequence = row["sequence"]
+            protein_id = row["protein_id"]
             features = row[feature_cols].values.astype(np.float32)
-            protein_features[sequence] = features
+            protein_features[protein_id] = features
 
         # Z-score normalize protein features
         all_feats = np.stack(list(protein_features.values()))
@@ -76,7 +77,7 @@ class EnzymeDatasetConfig:
         raw_df = pd.read_csv(self.raw_interactions)
 
         interactions = pd.DataFrame({
-            "protein_id": raw_df["protein_sequence"],
+            "protein_id": raw_df["protein_id"],
             "drug_id": raw_df["smiles"],
             "label": raw_df["label"],
         })
