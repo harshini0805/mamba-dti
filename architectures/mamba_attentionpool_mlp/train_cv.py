@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np, pandas as pd, torch, torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader
+logger = None
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,13 +68,30 @@ def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config
         loss_line = f"    {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
         print(loss_line)
         print(sep)
+        if logger:
+            logger.info(sep)
+            logger.info(f"Fold {fold} | Epoch {epoch}")
+            logger.info(sep)
+            logger.info(f"{header_sep}")
+            logger.info(header)
+            logger.info(f"{header_sep}")
+            for key in arch_config.metric_keys:
+                label = key.replace("_", " ").title()
+                line = f"    {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+                logger.info(line)
+            logger.info(loss_line)
+            logger.info(sep)
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc, best_val_metrics, best_val_loss = val_m["pr_auc"], copy.deepcopy(val_m), val_loss
             torch.save(model.state_dict(), checkpoint_dir / f"best_model_fold_{fold}.pt")
             wait = 0
         else:
             wait += 1
-            if wait >= config_arch.patience: break
+            if wait >= config_arch.patience:
+                msg = f"  Fold {fold} | Early stopping at epoch {epoch}"
+                if logger:
+                    logger.info(msg)
+                break
     if (checkpoint_dir / f"best_model_fold_{fold}.pt").exists(): model.load_state_dict(torch.load(checkpoint_dir / f"best_model_fold_{fold}.pt", map_location=DEVICE))
     return {f"val_{k}": v for k, v in (best_val_metrics or {}).items()} | ({"val_loss": best_val_loss} if best_val_loss else {})
 def main():
@@ -87,8 +105,25 @@ def main():
         if val: setattr(config, attr, val)
     config_data = load_dataset_config(args.dataset)
     results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
+    logs_dir = config.logs_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    global logger
+    log_file = logs_dir / f"{args.dataset}_cv_training.log"
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    logger.info(f"Starting 5-fold CV training on {args.dataset}")
+    logger.info(f"Results dir: {results_dir}")
+    logger.info(f"Logs dir: {logs_dir}")
+    logger.info(f"Checkpoint dir: {checkpoint_dir}\n")
+
     protein_features, drug_embeddings, interactions = config_data.load_data()
     CV_SEEDS = [42, 123, 2024]
     all_results = []

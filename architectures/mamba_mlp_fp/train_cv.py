@@ -22,6 +22,8 @@ import torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader
 
+logger = None  # Global logger
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -101,8 +103,8 @@ def train_fold(
     config_arch,
     config_data,
     checkpoint_dir: Path,
-) -> dict:
-    """Train one fold and evaluate on validation set."""
+) -> tuple[dict, list]:
+    """Train one fold and evaluate on validation set. Returns (best_metrics, epoch_history)"""
     model = MambaMLPDTI(drug_input_dim=config_data.drug_input_dim).to(DEVICE)
 
     optimizer = torch.optim.Adam(
@@ -116,6 +118,7 @@ def train_fold(
     best_val_metrics = None
     best_val_loss = None
     wait = 0
+    epoch_history = []  # Track all epochs
 
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loader = DataLoader(
@@ -159,6 +162,28 @@ def train_fold(
         print(loss_line)
         print(sep)
 
+        # Log to file
+        if logger:
+            logger.info(sep)
+            logger.info(f"Fold {fold} | Epoch {epoch}")
+            logger.info(sep)
+            logger.info(f"{header_sep}")
+            logger.info(header)
+            logger.info(f"{header_sep}")
+            for key in arch_config.metric_keys:
+                label = key.replace("_", " ").title()
+                line = f"    {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+                logger.info(line)
+            logger.info(loss_line)
+            logger.info(sep)
+
+        # Log epoch data
+        epoch_data = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
+        for key in arch_config.metric_keys:
+            epoch_data[f"train_{key}"] = train_m[key]
+            epoch_data[f"val_{key}"] = val_m[key]
+        epoch_history.append(epoch_data)
+
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc = val_m["pr_auc"]
             best_val_metrics = copy.deepcopy(val_m)
@@ -169,7 +194,10 @@ def train_fold(
         else:
             wait += 1
             if wait >= config_arch.patience:
-                print(f"  Fold {fold} | Early stopping at epoch {epoch}")
+                msg = f"  Fold {fold} | Early stopping at epoch {epoch}"
+                print(msg)
+                if logger:
+                    logger.info(msg)
                 break
 
     # Load best model and return metrics
@@ -184,7 +212,7 @@ def train_fold(
     if best_val_loss is not None:
         combined_metrics["val_loss"] = best_val_loss
 
-    return combined_metrics
+    return combined_metrics, epoch_history
 
 
 def main():
@@ -208,10 +236,27 @@ def main():
 
     results_dir = config.results_dir / args.dataset
     checkpoint_dir = config.checkpoints_dir / args.dataset
+    logs_dir = config.logs_dir / args.dataset
+
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging to file
+    global logger
+    log_file = logs_dir / f"{args.dataset}_cv_training.log"
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     print(f"\nLoading {args.dataset} dataset for 5-fold CV...")
+    logger.info(f"Starting 5-fold CV training on {args.dataset}")
+    logger.info(f"Results dir: {results_dir}")
+    logger.info(f"Logs dir: {logs_dir}")
+    logger.info(f"Checkpoint dir: {checkpoint_dir}\n")
     protein_features, drug_embeddings, interactions = config_data.load_data()
 
     print(f"Total interactions: {len(interactions):,}")
@@ -237,7 +282,7 @@ def main():
 
             print(f"\n  Fold {fold_idx}/5 | Train: {len(train_df):,} | Val: {len(val_df):,}")
 
-            fold_metrics = train_fold(
+            fold_metrics, epoch_hist = train_fold(
                 fold=fold_idx,
                 train_df=train_df,
                 val_df=val_df,
@@ -249,6 +294,10 @@ def main():
             )
 
             fold_results.append(fold_metrics)
+
+            # Save epoch history for this fold
+            epoch_hist_path = results_dir / f"epoch_history_seed{cv_seed}_fold{fold_idx}.csv"
+            pd.DataFrame(epoch_hist).to_csv(epoch_hist_path, index=False)
 
         all_results.append(fold_results)
 

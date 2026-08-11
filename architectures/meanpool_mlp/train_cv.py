@@ -6,6 +6,8 @@ import torch, torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader
 
+logger = None
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -55,6 +57,7 @@ def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config
     optimizer = torch.optim.Adam(model.parameters(), lr=config_arch.learning_rate, weight_decay=config_arch.weight_decay)
     criterion = nn.BCEWithLogitsLoss()
     best_val_pr_auc, best_val_metrics, best_val_loss, wait = -1.0, None, None, 0
+    epoch_history = []
     for epoch in range(1, config_arch.num_epochs + 1):
         train_loader = DataLoader(DTIDataset(train_df, protein_features, drug_embeddings), batch_size=config_arch.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
         val_loader = DataLoader(DTIDataset(val_df, protein_features, drug_embeddings), batch_size=config_arch.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
@@ -83,20 +86,43 @@ def train_fold(fold, train_df, val_df, protein_features, drug_embeddings, config
         loss_line = f"    {'Loss':<16}  {train_loss:>12.4f}  {val_loss:>12.4f}"
         print(loss_line)
         print(sep)
+        if logger:
+            logger.info(sep)
+            logger.info(f"Fold {fold} | Epoch {epoch}")
+            logger.info(sep)
+            logger.info(f"{header_sep}")
+            logger.info(header)
+            logger.info(f"{header_sep}")
+            for key in arch_config.metric_keys:
+                label = key.replace("_", " ").title()
+                line = f"    {label:<16}  {train_m[key]:>12.4f}  {val_m[key]:>12.4f}"
+                logger.info(line)
+            logger.info(loss_line)
+            logger.info(sep)
+        epoch_data = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
+        for key in arch_config.metric_keys:
+            epoch_data[f"train_{key}"] = train_m[key]
+            epoch_data[f"val_{key}"] = val_m[key]
+        epoch_history.append(epoch_data)
         if val_m["pr_auc"] > best_val_pr_auc:
             best_val_pr_auc, best_val_metrics, best_val_loss = val_m["pr_auc"], copy.deepcopy(val_m), val_loss
             torch.save(model.state_dict(), checkpoint_dir / f"best_model_fold_{fold}.pt")
             wait = 0
         else:
             wait += 1
-            if wait >= config_arch.patience: print(f"  Fold {fold} | Early stopping at epoch {epoch}"); break
+            if wait >= config_arch.patience:
+                msg = f"  Fold {fold} | Early stopping at epoch {epoch}"
+                print(msg)
+                if logger:
+                    logger.info(msg)
+                break
     checkpoint_path = checkpoint_dir / f"best_model_fold_{fold}.pt"
     if checkpoint_path.exists(): model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
     combined_metrics = {}
     if best_val_metrics:
         for key in best_val_metrics.keys(): combined_metrics[f"val_{key}"] = best_val_metrics[key]
     if best_val_loss is not None: combined_metrics["val_loss"] = best_val_loss
-    return combined_metrics
+    return combined_metrics, epoch_history
 
 def main():
     parser = argparse.ArgumentParser()
@@ -111,9 +137,25 @@ def main():
     if args.batch_size: config.batch_size = args.batch_size
     if args.lr: config.learning_rate = args.lr
     results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
+    logs_dir = config.logs_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    global logger
+    log_file = logs_dir / f"{args.dataset}_cv_training.log"
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
     print(f"\nLoading {args.dataset} dataset for 5-fold CV...")
+    logger.info(f"Starting 5-fold CV training on {args.dataset}")
+    logger.info(f"Results dir: {results_dir}")
+    logger.info(f"Logs dir: {logs_dir}")
+    logger.info(f"Checkpoint dir: {checkpoint_dir}\n")
     protein_features, drug_embeddings, interactions = config_data.load_data()
     print(f"Total interactions: {len(interactions):,}")
     CV_SEEDS = [42, 123, 2024]
@@ -128,8 +170,10 @@ def main():
         for fold_idx, (train_idx, val_idx) in enumerate(skf.split(interactions, interactions["label"]), start=1):
             train_df, val_df = interactions.iloc[train_idx].reset_index(drop=True), interactions.iloc[val_idx].reset_index(drop=True)
             print(f"\n  Fold {fold_idx}/5 | Train: {len(train_df):,} | Val: {len(val_df):,}")
-            fold_metrics = train_fold(fold_idx, train_df, val_df, protein_features, drug_embeddings, config, config_data, checkpoint_dir)
+            fold_metrics, epoch_hist = train_fold(fold_idx, train_df, val_df, protein_features, drug_embeddings, config, config_data, checkpoint_dir)
             fold_results.append(fold_metrics)
+            epoch_hist_path = results_dir / f"epoch_history_seed{cv_seed}_fold{fold_idx}.csv"
+            pd.DataFrame(epoch_hist).to_csv(epoch_hist_path, index=False)
         all_results.append(fold_results)
     print(f"\n{'='*70}\n  SUMMARY: 3 CV Runs × 5 Folds\n{'='*70}")
     # Build per-fold results table

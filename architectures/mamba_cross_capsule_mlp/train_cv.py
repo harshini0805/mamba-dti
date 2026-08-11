@@ -1,9 +1,10 @@
 """5-Fold CV training for Mamba+Cross-Attn+Capsule+MLP architecture."""
-import argparse, copy, json, sys
+import argparse, copy, json, logging, sys
 from pathlib import Path
 import numpy as np, pandas as pd, torch, torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader
+logger = None
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -89,8 +90,25 @@ def main():
     if args.batch_size: config.batch_size = args.batch_size
     if args.lr: config.learning_rate = args.lr
     results_dir, checkpoint_dir = config.results_dir / args.dataset, config.checkpoints_dir / args.dataset
+    logs_dir = config.logs_dir / args.dataset
     results_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    global logger
+    log_file = logs_dir / f"{args.dataset}_cv_training.log"
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(log_file)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    logger.info(f"Starting 5-fold CV training on {args.dataset}")
+    logger.info(f"Results dir: {results_dir}")
+    logger.info(f"Logs dir: {logs_dir}")
+    logger.info(f"Checkpoint dir: {checkpoint_dir}\n")
+
     protein_features, drug_embeddings, interactions = config_data.load_data()
     CV_SEEDS = [42, 123, 2024]
     all_results = []
