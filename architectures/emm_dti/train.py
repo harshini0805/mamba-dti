@@ -122,7 +122,7 @@ def run_epoch(model, loader, criterion, optimizer=None, device=DEVICE):
     return total_loss / len(loader.dataset), compute_metrics(all_labels, all_probs)
 
 
-def train_run(run_idx, drugs, proteins, train_interactions, val_interactions, config_training, checkpoint_dir, device=DEVICE):
+def train_run(run_idx, drugs, proteins, train_interactions, val_interactions, test_interactions, config_training, checkpoint_dir, device=DEVICE):
     """Train and validate a single independent run with fixed train/valid split."""
     # Mine FCS from this run's training data only (prevent data leakage)
     logger.info(f"  Mining FCS patterns from run {run_idx} training data...")
@@ -154,6 +154,18 @@ def train_run(run_idx, drugs, proteins, train_interactions, val_interactions, co
         fcs_patterns=fcs.get_patterns(),
     )
 
+    test_drug_seqs = [drugs[drug_id] for drug_id in test_interactions["drug_id"]]
+    test_protein_seqs = [proteins[protein_id] for protein_id in test_interactions["protein_id"]]
+    test_labels = test_interactions["label"].tolist()
+
+    test_dataset = DTIDataset(
+        drug_sequences=test_drug_seqs,
+        protein_sequences=test_protein_seqs,
+        interactions=test_labels,
+        fcs_vocab=fcs_vocab,
+        fcs_patterns=fcs.get_patterns(),
+    )
+
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
@@ -165,6 +177,14 @@ def train_run(run_idx, drugs, proteins, train_interactions, val_interactions, co
 
     val_loader = DataLoader(
         val_dataset,
+        batch_size=config_training["batch_size"],
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=config_training["batch_size"],
         shuffle=False,
         num_workers=0,
@@ -234,9 +254,40 @@ def train_run(run_idx, drugs, proteins, train_interactions, val_interactions, co
                 logger.info(f"  Early stopping at epoch {epoch} (patience={config_training['patience']})")
                 break
 
-    # Load best model
-    if (checkpoint_dir / f"best_model_run_{run_idx}.pt").exists():
-        model.load_state_dict(torch.load(checkpoint_dir / f"best_model_run_{run_idx}.pt", map_location=device))
+    # Load best model and evaluate on test set
+    checkpoint_path = checkpoint_dir / f"best_model_run_{run_idx}.pt"
+    if checkpoint_path.exists():
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+
+        # Evaluate on test set
+        print(f"\n  Evaluating best model on test set...")
+        test_loss, test_metrics = run_epoch(model, test_loader, criterion, device=device)
+
+        # Combine val and test metrics
+        combined_metrics = {}
+        if best_val_metrics:
+            for key in best_val_metrics.keys():
+                combined_metrics[f"val_{key}"] = best_val_metrics[key]
+        for key in test_metrics.keys():
+            combined_metrics[f"test_{key}"] = test_metrics[key]
+        if best_val_loss is not None:
+            combined_metrics["val_loss"] = best_val_loss
+        combined_metrics["test_loss"] = test_loss
+
+        # Print test results
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+        print(f"  {'Metric':<16}  {'Val':>12}  {'Test':>12}")
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+        metric_keys = ["accuracy", "precision", "recall", "specificity", "mcc", "roc_auc", "pr_auc"]
+        for key in metric_keys:
+            val_key = f"val_{key}"
+            test_key = f"test_{key}"
+            if val_key in combined_metrics and test_key in combined_metrics:
+                line = f"  {key:<16}  {combined_metrics[val_key]:>12.4f}  {combined_metrics[test_key]:>12.4f}"
+                print(line)
+        print(f"  {'─'*16}  {'─'*12}  {'─'*12}")
+
+        return combined_metrics
 
     return {f"val_{k}": v for k, v in (best_val_metrics or {}).items()} | ({"val_loss": best_val_loss} if best_val_loss else {})
 
@@ -314,8 +365,9 @@ def main():
     # Get fixed splits
     train_interactions = interactions_df[interactions_df["split"] == "train"]
     val_interactions = interactions_df[interactions_df["split"] == "valid"]
+    test_interactions = interactions_df[interactions_df["split"] == "test"]
 
-    logger.info(f"Train: {len(train_interactions)}, Valid: {len(val_interactions)}")
+    logger.info(f"Train: {len(train_interactions)}, Valid: {len(val_interactions)}, Test: {len(test_interactions)}")
     logger.info("")
 
     # Run with multiple seeds
@@ -337,6 +389,7 @@ def main():
             proteins,
             train_interactions,
             val_interactions,
+            test_interactions,
             config_training,
             checkpoint_dir,
         )
@@ -357,19 +410,23 @@ def main():
             row[key] = val
         results_data.append(row)
 
-    # Compute summary statistics
-    metric_keys = ["val_pr_auc", "val_roc_auc", "val_accuracy", "val_precision", "val_recall", "val_specificity", "val_mcc"]
+    # Compute summary statistics for both val and test
+    metric_keys = ["pr_auc", "roc_auc", "accuracy", "precision", "recall", "specificity", "mcc"]
     summary_metrics = {}
 
-    for metric_key in metric_keys:
-        all_vals = [row[metric_key] for row in results_data if metric_key in row]
-        if all_vals:
-            mean_val = float(np.mean(all_vals))
-            std_val = float(np.std(all_vals))
-            summary_metrics[metric_key] = {"mean": mean_val, "std": std_val}
-            msg = f"  {metric_key:<20}: {mean_val:.4f} ± {std_val:.4f}"
-            print(msg)
-            logger.info(msg)
+    for prefix in ["val", "test"]:
+        print(f"\n  {prefix.upper()} SET SUMMARY:")
+        print(f"  {'─'*50}")
+        for metric_key in metric_keys:
+            full_key = f"{prefix}_{metric_key}"
+            all_vals = [row[full_key] for row in results_data if full_key in row]
+            if all_vals:
+                mean_val = float(np.mean(all_vals))
+                std_val = float(np.std(all_vals))
+                summary_metrics[full_key] = {"mean": mean_val, "std": std_val}
+                msg = f"  {full_key:<20}: {mean_val:.4f} ± {std_val:.4f}"
+                print(msg)
+                logger.info(msg)
 
     # Save results
     results_csv = results_dir / "results.csv"
