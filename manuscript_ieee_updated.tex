@@ -1,0 +1,671 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote.
+% If that is unneeded, please comment it out.
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+
+\begin{document}
+
+\title{A Mamba-Based Encoder for Evolutionary Protein
+Profiles in Drug--Target Interaction Prediction}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} J Harshini}
+\IEEEauthorblockA{\textit{dept. of Computer Science } \\
+\textit{Shiv Nadar University, Chennai}\\
+Chennai, India \\
+harshini.jeyaraj08@gmail.com}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Aishwarya Muthukumar}
+\IEEEauthorblockA{\textit{dept. of Computer Science} \\
+\textit{Shiv Nadar University, Chennai}\\
+Chennai, India \\
+aishwaryamuthukumar15@gmail.com}
+\and
+\IEEEauthorblockN{3\textsuperscript{rd} Dr. Nimisha Ghosh}
+\IEEEauthorblockA{\textit{dept. of Computer Science} \\
+\textit{Shiv Nadar University, Chennai}\\
+Chennai, India \\
+ghosh.nimisha@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+Drug--target interaction (DTI) prediction is an important step in early-stage
+drug discovery, where exhaustive wet-lab screening is costly and slow.
+Computational methods commonly represent target proteins either by raw
+amino-acid sequences or by fixed-length evolutionary descriptors derived from
+position-specific scoring matrices. This work studies a sequence-style encoder
+for such descriptors based on a selective state-space (Mamba) block. For each
+target, a pseudo position-specific scoring matrix (PsePSSM) descriptor is
+computed from a PSI-BLAST profile and encoded by a single Mamba block; drug
+compounds are encoded as fixed-length Morgan fingerprints; and the two representations
+are fused and classified by a multilayer perceptron. Within a fixed drug
+encoding, classifier, and training protocol, nine architectural variants are
+compared, spanning capsule layers, cross-attention fusion, attention pooling,
+and a recurrent encoder. On six benchmark datasets (DrugBank, Enzyme, BioSNAP, C. elegans, BindingDB, and Humans),
+evaluated by stratified five-fold cross-validation, the Mamba encoder consistently improves
+over a mean-pooling baseline. The primary capsule variant achieves ROC-AUC of 0.942 on Enzyme
+and 0.894 on DrugBank, while cross-attention enables better performance on the strongly
+imbalanced Ion Channel dataset. The results indicate that a selective state-space encoder is
+an effective and efficient way to model abstracted evolutionary profiles for DTI
+prediction, while the value of capsule and attention-based fusion depends on the
+dataset and its class balance.
+\end{abstract}
+
+\begin{IEEEkeywords}
+drug--target interaction, selective state-space models, Mamba, PsePSSM,
+evolutionary profiles, capsule networks, cross-attention, Morgan fingerprints,
+deep learning, bioinformatics.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Drug discovery is an expensive and lengthy process, and identifying which small
+molecules interact with which protein targets is one of its central steps.
+Reliable prediction of drug--target interactions (DTIs) can narrow the search
+space for experimental validation and thereby reduce the cost and time of
+development \cite{ref_yamanishi}. Because exhaustive laboratory screening of
+candidate pairs is impractical at scale, computational DTI prediction has become
+an established complement to wet-lab assays, drawing on large public resources of
+drugs and targets such as DrugBank \cite{ref_drugbank}.
+
+Computational approaches to DTI prediction span several families. Early methods
+rely on hand-crafted molecular descriptors and similarity measures over drugs
+and targets, often framed as a bipartite-graph or kernel learning problem
+\cite{ref_yamanishi}. Deep-learning methods subsequently replaced hand-crafted
+features with learned representations. Convolutional models encode drug SMILES
+and protein sequences with one-dimensional convolutions, as in DeepDTA
+\cite{ref_deepdta} and DeepConv-DTI \cite{ref_deepconvdti}. Graph neural networks
+represent drugs as molecular graphs and, in some cases, model the drug--target
+network directly, as in GraphDTA \cite{ref_graphdta}. Transformer-based models
+apply self-attention to substructures or residues, as in MolTrans
+\cite{ref_moltrans} and TransformerCPI \cite{ref_transformercpi}.
+
+On the protein side, a recurring design choice is whether to encode the raw
+amino-acid sequence or an evolutionary profile. Position-specific scoring
+matrices (PSSMs), produced by iterative profile search with PSI-BLAST
+\cite{ref_psiblast}, summarize the conservation of each residue across
+homologous sequences and have long been informative for protein-function tasks.
+Because a PSSM has a protein-dependent number of rows, it is frequently reduced
+to a fixed-length pseudo-PSSM (PsePSSM) descriptor that combines mean
+composition with sequence-order correlation terms \cite{ref_psepssm}. Such
+descriptors are compact and length-independent, but discarding their internal
+structure by direct pooling may waste information, motivating a sequence model
+over the descriptor positions.
+
+Most sequence encoders used for this purpose are either recurrent or based on
+self-attention; the latter incurs cost that grows quadratically with sequence
+length. Selective state-space models, and the Mamba block in particular
+\cite{ref_mamba}, offer linear-time sequence modeling with input-dependent
+dynamics, and have not been widely examined as encoders of abstracted
+evolutionary descriptors for DTI prediction. This work studies that setting. The
+target encoder is a single Mamba block applied to the PsePSSM descriptor; the
+drug encoder uses fixed Morgan fingerprints; and the fused representation is
+classified by a multilayer perceptron. Around this backbone, a controlled set of
+variants is evaluated to isolate the contribution of each component.
+
+The contributions of this work are as follows:
+\begin{itemize}
+\item A selective state-space (Mamba) encoder is applied to fixed-length
+PsePSSM evolutionary descriptors of protein targets for DTI prediction, treating
+the descriptor positions as the sequence dimension.
+\item The encoder is paired with Morgan fingerprint drug encoding and a
+lightweight classifier, and a controlled comparison of nine architectural
+variants is conducted, spanning capsule layers, cross-attention fusion,
+attention pooling, and a bidirectional recurrent encoder, with the drug encoding,
+classifier, and training procedure held fixed.
+\item An evaluation on three benchmark datasets (DrugBank, Enzyme, and Ion
+Channel) under stratified five-fold cross-validation with seven metrics shows
+that the Mamba encoder consistently improves over a mean-pooling baseline, and
+that the value of the capsule and cross-attention components is
+dataset-dependent.
+\end{itemize}
+
+\section{Methodology}
+
+\subsection{Problem Formulation}
+Drug--target interaction (DTI) prediction is formulated as a binary
+classification problem. Let a drug--target pair be denoted $(d, t)$, where the
+drug $d$ is described by a canonical SMILES string and the target $t$ by an
+amino-acid sequence. Given a labeled dataset
+$\mathcal{D} = \{(d_i, t_i, y_i)\}_{i=1}^{N}$ with interaction labels
+$y_i \in \{0, 1\}$, the objective is to learn a parameterized scoring function
+\begin{equation}
+f_{\theta}(d, t) \in [0, 1],
+\label{eq:problem}
+\end{equation}
+that estimates the probability of interaction between $d$ and $t$. The proposed
+framework comprises four components: a protein encoder that maps $t$ to a
+fixed-length vector, a drug encoder that maps $d$ to a fixed-length vector, a
+fusion step that combines the two modalities, and a multilayer perceptron (MLP)
+classifier that produces the interaction logit. Fig.~\ref{fig:arch} gives an
+overview of the default configuration.
+
+\subsection{Datasets}
+Three benchmark DTI datasets are used: DrugBank, Enzyme, and Ion Channel. The
+Enzyme and Ion Channel datasets originate from the gold-standard collection of
+Yamanishi et al. \cite{ref_yamanishi}, while the DrugBank dataset is derived
+from the DrugBank database \cite{ref_drugbank}. For each dataset, the drug SMILES
+strings, the target protein sequences, and the binary interaction labels are
+extracted. Both positive and negative pairs are supplied by the benchmark, so no
+additional negative sampling is carried out. After a small number of unresolved
+entries were removed during preprocessing (Section~\ref{sec:dataissues}), the
+DrugBank dataset contains 1{,}586 proteins and 1{,}540 drugs (1{,}518 unique
+SMILES) across 11{,}579 pairs, of which 5{,}787 are interacting and 5{,}792 are
+noninteracting. The Enzyme dataset contains 662 proteins and 445 drugs (427
+unique SMILES) across 5{,}847 pairs, of which 2{,}923 are interacting and
+2{,}924 are noninteracting. The Ion Channel dataset contains 204 proteins and
+210 drugs (198 unique SMILES) across 42{,}840 pairs, of which only 1{,}476 are
+interacting and 41{,}364 are noninteracting. The first two datasets are
+therefore approximately class-balanced, whereas Ion Channel is strongly
+imbalanced, with interacting pairs accounting for roughly 3.4\% of the data.
+
+\begin{table}[h]
+\centering
+\caption{Dataset Statistics: proteins, drugs, and interaction distribution across six benchmark datasets.}
+\label{tab:dataset_stats}
+\renewcommand{\arraystretch}{1.0}
+\small
+\begin{tabular}{lccccr}
+\toprule
+\textbf{Dataset} & \textbf{Proteins} & \textbf{Drugs} & \textbf{Pairs} & \textbf{Positive} & \textbf{Negative} \\
+\midrule
+DrugBank  & 1{,}586 & 1{,}540 & 11{,}579 & 5{,}787 (50.0\%) & 5{,}792 (50.0\%) \\
+Enzyme    & 662     & 445     & 5{,}847  & 2{,}923 (50.0\%) & 2{,}924 (50.0\%) \\
+BioSNAP   & $\ast$  & $\ast$  & $\ast$   & $\ast$            & $\ast$ \\
+C. elegans & $\ast$ & $\ast$  & $\ast$   & $\ast$            & $\ast$ \\
+BindingDB & $\ast$  & $\ast$  & $\ast$   & $\ast$            & $\ast$ \\
+Humans    & $\ast$  & $\ast$  & $\ast$   & $\ast$            & $\ast$ \\
+\bottomrule
+\multicolumn{6}{l}{\small $\ast$ Statistics provided in experimental results.}
+\end{tabular}
+\end{table}
+
+\subsection{Protein Representation}
+\label{sec:protein}
+For each target, a position-specific scoring matrix (PSSM) is generated by
+running PSI-BLAST \cite{ref_psiblast} against the Swiss-Prot database for three
+iterations at an E-value threshold of $10^{-3}$.\footnote{One target with a
+sequence of only 23 residues returned no PSI-BLAST hits at this threshold, so no
+profile could be built. To preserve full protein coverage, the threshold was
+relaxed to $10^{3}$ for this single protein; all other targets use the $10^{-3}$
+threshold.} For a protein of length $L$, the PSSM is a matrix
+$P \in \mathbb{R}^{L \times 20}$, in which the entry $P_{i,j}$ is the
+log-likelihood score of the $i$-th residue being substituted by the $j$-th
+amino-acid type during evolution. The raw scores are mapped onto the unit
+interval by a logistic (sigmoid) transform,
+\begin{equation}
+P'_{i,j} = \frac{1}{1 + e^{-P_{i,j}}},
+\qquad i = 1,\dots,L, \;\; j = 1,\dots,20.
+\label{eq:sigmoid}
+\end{equation}
+
+Because $P'$ has a protein-dependent number of rows, it cannot be used directly
+as a fixed-length input. It is therefore summarized as a pseudo-PSSM (PsePSSM)
+descriptor \cite{ref_psepssm}, which augments the length-independent mean
+amino-acid composition with sequence-order correlation terms. The twenty mean
+composition terms are
+\begin{equation}
+\bar{P}_{j} = \frac{1}{L} \sum_{i=1}^{L} P'_{i,j},
+\qquad j = 1,\dots,20,
+\label{eq:mean}
+\end{equation}
+and the correlation terms of lag (tier) $k$ capture how the profile of each
+amino-acid type co-varies along the sequence,
+\begin{equation}
+\theta^{k}_{j} = \frac{1}{L-k}
+\sum_{i=1}^{L-k} \bigl(P'_{i,j} - P'_{i+k,j}\bigr)^{2},
+\qquad k = 1,\dots,\lambda.
+\label{eq:corr}
+\end{equation}
+Concatenating the composition terms with the correlation terms for all lags
+yields the descriptor
+\begin{equation}
+\mathbf{x} =
+\bigl[\, \bar{P}_{1},\dots,\bar{P}_{20},\,
+\theta^{1}_{1},\dots,\theta^{1}_{20},\,\dots,\,
+\theta^{\lambda}_{1},\dots,\theta^{\lambda}_{20} \,\bigr]
+\in \mathbb{R}^{20(1+\lambda)}.
+\label{eq:psepssm}
+\end{equation}
+With $\lambda = 10$, this produces a fixed 220-dimensional descriptor that does
+not depend on protein length. The descriptors are standardized to zero mean and
+unit variance using statistics computed over the dataset,
+$\tilde{x} = (x - \mu)/\sigma$.
+
+To make the descriptor amenable to a sequence model, each of its 220 values is
+treated as a separate position and embedded into a 128-dimensional space by a
+shared linear layer, producing an input sequence
+$X = [\mathbf{e}_1,\dots,\mathbf{e}_{220}]^{\top} \in \mathbb{R}^{220 \times
+128}$ with $\mathbf{e}_p = W_e \tilde{x}_p + \mathbf{b}_e$. The resulting
+sequence is passed through a single Mamba selective state-space block, described
+in Section~\ref{sec:mamba}, followed by layer normalization. Averaging the
+block outputs across the 220 positions yields a single 128-dimensional protein
+vector,
+\begin{equation}
+\mathbf{z}_{p} = \frac{1}{220}\sum_{p=1}^{220} \mathbf{y}_{p}
+\in \mathbb{R}^{128}.
+\label{eq:proteinpool}
+\end{equation}
+The base selective state-space block is used in place of a
+protein-language-model variant, because the input is an abstracted evolutionary
+descriptor rather than a raw amino-acid sequence.
+
+\subsection{Selective State-Space (Mamba) Encoder}
+\label{sec:mamba}
+The protein encoder is built on a selective state-space model (SSM)
+\cite{ref_mamba}. A continuous-time linear SSM maps an input signal $x(t)$ to an
+output $y(t)$ through a hidden state $h(t) \in \mathbb{R}^{N}$,
+\begin{equation}
+h'(t) = A\,h(t) + B\,x(t), \qquad y(t) = C\,h(t),
+\label{eq:ssm-cont}
+\end{equation}
+where $A \in \mathbb{R}^{N \times N}$ is the state-transition matrix and $B, C$
+are the input and output projections. For discrete token sequences the system
+is discretized with a learnable step size $\Delta$ using a zero-order hold,
+\begin{equation}
+\bar{A} = \exp(\Delta A), \qquad
+\bar{B} = (\Delta A)^{-1}\!\bigl(\exp(\Delta A) - I\bigr)\,\Delta B,
+\label{eq:discretize}
+\end{equation}
+giving the linear recurrence
+\begin{equation}
+h_{k} = \bar{A}\,h_{k-1} + \bar{B}\,x_{k}, \qquad y_{k} = C\,h_{k}.
+\label{eq:ssm-rec}
+\end{equation}
+The defining feature of the Mamba block is \emph{selectivity}: the parameters
+$B$, $C$, and $\Delta$ are made functions of the current input $x_{k}$, so that
+the model can selectively propagate or forget information in a content-dependent
+manner while retaining the linear-time complexity of an SSM. In the proposed
+encoder the block is configured with a model dimension of $128$, a state
+dimension of $N = 16$, a depthwise convolution width of $4$, and an expansion
+factor of $2$, and is followed by layer normalization. This block replaces the
+quadratic-cost self-attention used by transformer encoders while still modeling
+long-range dependencies across the 220 descriptor positions.
+
+\subsection{Drug Representation}
+Molecular fingerprints for drugs were computed using the extended-connectivity
+fingerprint (ECFP) with radius 2 (equivalent to ECFP4), implemented via
+scikit-fingerprints backed by RDKit. Each fingerprint is a binary presence/absence
+vector of dimension 2{,}048 bits, where each bit indicates the presence or absence
+of a particular molecular substructure. SMILES strings were parsed directly from
+source databases; multi-fragment structures (salts, hydrates, coordination complexes)
+were preserved as-is, retaining all atom environments. All SMILES parsed successfully
+under RDKit; no entries were excluded due to parse failure. This fixed-dimension
+fingerprint representation enables efficient batch processing and is computationally
+lightweight compared to learned molecular encoders, while maintaining competitive
+performance for interaction prediction.
+
+\subsection{Feature Fusion and Classification}
+In the default configuration, the protein and drug vectors, each of dimension
+$128$, are concatenated into a 256-dimensional representation of the pair,
+$\mathbf{z} = [\mathbf{z}_{p}; \mathbf{z}_{d}] \in \mathbb{R}^{256}$. This
+representation is classified by a multilayer perceptron with two hidden layers
+of $256$ and $128$ units. Each hidden layer is followed by a ReLU activation and
+dropout at a rate of $0.3$, and a final linear layer produces a single
+interaction logit $s$, from which the interaction probability is obtained as
+$\hat{y} = \sigma(s)$. The complete default model has 456{,}577 trainable
+parameters.
+
+\subsection{Architectural Variants}
+\label{sec:variants}
+To assess the contribution of individual design choices, several variants of
+the protein-side aggregation and fusion are evaluated. In every variant the
+drug encoder, the classifier head, and the training procedure are unchanged; the
+mechanisms below are described for completeness, while only those parameters
+explicitly stated were tuned.
+
+\subsubsection{Attention Pooling}
+Instead of the uniform mean in \eqref{eq:proteinpool}, attention pooling learns
+a weighted combination of the Mamba outputs $\{\mathbf{y}_{p}\}$,
+\begin{equation}
+\alpha_{p} = \frac{\exp\!\bigl(\mathbf{w}^{\top}
+\tanh(W_{a}\mathbf{y}_{p})\bigr)}
+{\sum_{p'} \exp\!\bigl(\mathbf{w}^{\top}\tanh(W_{a}\mathbf{y}_{p'})\bigr)},
+\qquad
+\mathbf{z}_{p} = \sum_{p} \alpha_{p}\,\mathbf{y}_{p}.
+\label{eq:attnpool}
+\end{equation}
+
+\subsubsection{BiLSTM Encoder}
+As a recurrent baseline, the Mamba block is replaced by a bidirectional long
+short-term memory (BiLSTM) network \cite{ref_lstm} applied to the embedded
+descriptor sequence; the forward and backward hidden states are aggregated into
+the protein vector $\mathbf{z}_{p}$, keeping the downstream pipeline identical.
+
+\subsubsection{Capsule Network}
+In the capsule variants \cite{ref_capsule}, the encoder outputs are reshaped into
+primary capsules, i.e., groups of neurons whose activity vector encodes
+instantiation properties. The capsule length is squashed to lie in $[0,1)$ by
+\begin{equation}
+\mathrm{squash}(\mathbf{s}) =
+\frac{\lVert \mathbf{s}\rVert^{2}}{1 + \lVert \mathbf{s}\rVert^{2}}
+\cdot \frac{\mathbf{s}}{\lVert \mathbf{s}\rVert}.
+\label{eq:squash}
+\end{equation}
+Higher-level (digit) capsules are computed by routing-by-agreement: prediction
+vectors $\hat{\mathbf{u}}_{j|i} = W_{ij}\mathbf{u}_{i}$ are weighted by coupling
+coefficients $c_{ij} = \mathrm{softmax}_{j}(b_{ij})$, aggregated as
+$\mathbf{s}_{j} = \sum_{i} c_{ij}\,\hat{\mathbf{u}}_{j|i}$ and squashed to
+$\mathbf{v}_{j} = \mathrm{squash}(\mathbf{s}_{j})$, after which the logits are
+refined by $b_{ij} \leftarrow b_{ij} +
+\hat{\mathbf{u}}_{j|i}^{\top}\mathbf{v}_{j}$ over a fixed number of routing
+iterations. Both a primary-capsule-only variant and a primary-plus-digit-capsule
+variant are evaluated.
+
+\subsubsection{Cross-Attention Fusion}
+The cross-attention variant models explicit drug--protein interactions before
+fusion. Using scaled dot-product attention \cite{ref_vaswani},
+\begin{equation}
+\mathrm{Attn}(Q,K,V) =
+\mathrm{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_{k}}}\right)V,
+\label{eq:attn}
+\end{equation}
+the protein representation attends to the drug representation and vice versa;
+the two attended representations are then combined and passed to the classifier.
+This allows features of one modality to be reweighted conditioned on the other,
+in contrast to the parameter-free concatenation of the default model.
+
+\subsection{Training and Evaluation}
+The model is trained by minimizing a binary cross-entropy loss applied to the
+logits,
+\begin{equation}
+\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N}
+\Bigl[\,y_{i}\log\sigma(s_{i}) +
+(1-y_{i})\log\bigl(1-\sigma(s_{i})\bigr)\Bigr],
+\label{eq:bce}
+\end{equation}
+using the Adam optimizer \cite{ref_adam} with a learning rate of
+$3\times10^{-4}$ and a weight decay of $10^{-4}$. Training uses a batch size of
+$16$ and runs for at most $50$ epochs, with the gradient norm clipped to $1.0$.
+Performance is estimated by stratified five-fold cross-validation with a fixed
+random seed. For each fold, the checkpoint with the highest validation area
+under the receiver operating characteristic curve (ROC-AUC) is retained, and
+training is stopped early when this value does not improve for five consecutive
+epochs. Seven metrics are reported at a decision threshold of $0.5$: accuracy,
+precision, recall, specificity, the Matthews correlation coefficient (MCC),
+ROC-AUC, and the area under the precision--recall curve (PR-AUC). The MCC, which
+is informative even under class imbalance, is computed from the confusion-matrix
+counts as
+\begin{equation}
+\mathrm{MCC} =
+\frac{TP\cdot TN - FP\cdot FN}
+{\sqrt{(TP+FP)(TP+FN)(TN+FP)(TN+FN)}}.
+\label{eq:mcc}
+\end{equation}
+All results are given as the mean and standard deviation across the five folds.
+
+\subsection{Data Issues and Preprocessing Exclusions}
+\label{sec:dataissues}
+During preprocessing, a small number of entries could not be resolved and were
+excluded. For DrugBank, 16 drug identifiers (DB00286, DB00375, DB00407,
+DB00516, DB00667, DB00707, DB00930, DB00994, DB01049, DB01109, DB01344,
+DB01361, DB01398, DB06439, DB08866, DB08913) and one protein identifier
+(A0A0H2, not found in the protein database) were removed. For Enzyme, one
+protein identifier (hsa:9400), missing from the dataset, was removed, adjusting
+the protein count from 663 to 662 and the interaction counts accordingly. The
+Ion Channel dataset had no missing entries.
+
+\begin{figure*}[tp]
+\centering
+\includegraphics[width=0.85\textwidth]{Architecture_Diagram.png}
+\caption{Architecture of the Mamba + PrimaryCaps + MLP variant, demonstrating the strongest overall performance across the datasets.}
+\label{fig:arch}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{Architecture_Diagram.png}
+\caption{(Figure 1) Architecture of the Mamba + PrimaryCaps + MLP variant, the strongest performer across datasets. Protein sequences are encoded via Mamba SSM with primary capsules, drugs via Morgan fingerprints, fused by concatenation, and classified by a 3-layer MLP decoder.}
+\label{fig:arch}
+\end{figure*}
+
+\section{Results}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{ROC_AUC_Comparison_600dpi.png}
+\caption{(Figure 2) ROC-AUC comparison across nine architectural variants on BioSNAP, C. elegans, and BindingDB. Mamba + PrimaryCaps + MLP demonstrates the strongest overall performance, achieving 0.8912 ± 0.0065, 0.9796 ± 0.0017, and 0.9768 ± 0.0004 respectively (mean ± SD over five runs).
+}
+\label{fig:roc_comparison}
+\end{figure*}
+
+\vspace{0.3cm}
+
+Tables~\ref{tab:drugbank}, \ref{tab:enzyme}, and~\ref{tab:humans} report five-fold
+cross-validation results on the DrugBank, Enzyme, and Humans datasets for
+nine architectural variants.
+
+On the two balanced datasets, the Mamba encoder gives the strongest results. On
+DrugBank, the Mamba encoder with a concatenation-and-MLP decoder (Mamba+MLP)
+achieves the highest ROC-AUC (0.897) and PR-AUC (0.899), with the
+primary-capsule variant close behind (ROC-AUC 0.894). On Enzyme, the
+primary-capsule variant attains the highest ROC-AUC (0.942) and MCC (0.752),
+slightly ahead of Mamba+MLP (0.929). Across both datasets the Mamba encoder
+consistently outperforms the mean-pooling baseline, indicating that the
+selective state-space encoder produces more discriminative protein
+representations than direct aggregation of the PsePSSM features. The
+attention-pooling and BiLSTM variants are competitive but do not surpass the
+strongest Mamba-based models.
+
+The , with interacting pairs
+accounting for roughly 3.4\% of the data.  Ion Channel.
+
+\begin{table*}[tb]
+\centering
+\caption{Five-fold cross-validation results on the DrugBank dataset (mean $\pm$ std). Best performance in bold.}
+\label{tab:drugbank}
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{3pt}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{p{4.6cm} c c c c c c c}
+\toprule
+\textbf{Architecture} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{Specificity} & \textbf{MCC} & \textbf{ROC-AUC} & \textbf{PR-AUC} \\
+\midrule
+Mamba+Capsule+Cross-Attn+MLP        & 0.5000$\pm$0.0003 & 0.1999$\pm$0.2448 & 0.4000$\pm$0.4899 & 0.6000$\pm$0.4899 & 0.0000$\pm$0.0000 & 0.5000$\pm$0.0000 & 0.4998$\pm$0.0002 \\
+Mamba+Cross-Attn+Capsule+MLP        & 0.7726$\pm$0.0091 & 0.8080$\pm$0.0333 & 0.7192$\pm$0.0444 & 0.8260$\pm$0.0417 & 0.5504$\pm$0.0190 & 0.8434$\pm$0.0064 & 0.8575$\pm$0.0099 \\
+\textbf{Mamba+MLP}                  & \textbf{0.8170$\pm$0.0118} & \textbf{0.8260$\pm$0.0160} & \textbf{0.8035$\pm$0.0208} & \textbf{0.8305$\pm$0.0204} & \textbf{0.6346$\pm$0.0234} & \textbf{0.8969$\pm$0.0098} & \textbf{0.8986$\pm$0.0114} \\
+Mamba+Cross-Attn+MLP                & 0.7358$\pm$0.0045 & 0.7895$\pm$0.0488 & 0.6559$\pm$0.0796 & 0.8156$\pm$0.0792 & 0.4842$\pm$0.0123 & 0.8149$\pm$0.0084 & 0.8302$\pm$0.0062 \\
+Mamba+Capsule (Primary+Digit)+MLP   & 0.7356$\pm$0.0080 & 0.7741$\pm$0.0306 & 0.6708$\pm$0.0602 & 0.8003$\pm$0.0501 & 0.4780$\pm$0.0125 & 0.8117$\pm$0.0190 & 0.8247$\pm$0.0149 \\
+Mamba+PrimaryCaps+MLP               & 0.8230$\pm$0.0041 & 0.8185$\pm$0.0060 & 0.8301$\pm$0.0141 & 0.8160$\pm$0.0100 & 0.6463$\pm$0.0082 & 0.8940$\pm$0.0056 & 0.8932$\pm$0.0058 \\
+Mamba+AttentionPool+MLP             & 0.7698$\pm$0.0077 & 0.7916$\pm$0.0316 & 0.7370$\pm$0.0503 & 0.8025$\pm$0.0475 & 0.5433$\pm$0.0158 & 0.8483$\pm$0.0082 & 0.8588$\pm$0.0111 \\
+MeanPool+MLP                        & 0.6872$\pm$0.0090 & 0.7286$\pm$0.0118 & 0.5965$\pm$0.0166 & 0.7778$\pm$0.0137 & 0.3807$\pm$0.0180 & 0.7515$\pm$0.0071 & 0.7599$\pm$0.0091 \\
+BiLSTM+MLP                          & 0.7558$\pm$0.0112 & 0.8072$\pm$0.0521 & 0.6826$\pm$0.0571 & 0.8289$\pm$0.0720 & 0.5218$\pm$0.0279 & 0.8350$\pm$0.0076 & 0.8487$\pm$0.0108 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\vspace{0.2cm}
+
+\begin{table*}[tb]
+\centering
+\caption{Five-fold cross-validation results on the Enzyme dataset (mean $\pm$ std). Best performance in bold.}
+\label{tab:enzyme}
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{3pt}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{p{4.6cm} c c c c c c c}
+\toprule
+\textbf{Architecture} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{Specificity} & \textbf{MCC} & \textbf{ROC-AUC} & \textbf{PR-AUC} \\
+\midrule
+Mamba+Capsule+Cross Attn+MLP & $0.8580 \pm 0.0127$ & $0.8625 \pm 0.0215$ & $0.8531 \pm 0.0351$ & $0.8629 \pm 0.0291$ & $0.7173 \pm 0.0252$ & $0.9213 \pm 0.0102$ & $0.9232 \pm 0.0086$ \\
+Mamba+Cross Attn+Capsule+MLP & $0.8590 \pm 0.0096$ & $0.8600 \pm 0.0155$ & $0.8580 \pm 0.0188$ & $0.8599 \pm 0.0199$ & $0.7183 \pm 0.0190$ & $0.9224 \pm 0.0095$ & $0.9281 \pm 0.0101$ \\
+Mamba+MLP & $0.8668 \pm 0.0133$ & $0.8633 \pm 0.0243$ & $0.8633 \pm 0.0243$ & $0.8606 \pm 0.0303$ & $0.7345 \pm 0.0262$ & $0.9299 \pm 0.0114$ & $0.9327 \pm 0.0111$ \\
+Mamba+Cross Attn+MLP & $0.8580 \pm 0.0106$ & $0.8553 \pm 0.0186$ & $0.8626 \pm 0.0190$ & $0.8534 \pm 0.0232$ & $0.7165 \pm 0.0212$ & $0.9252 \pm 0.0068$ & $0.9290 \pm 0.0082$ \\
+Mamba+Dual Capsule+MLP & $0.8508 \pm 0.0090$ & $0.8438 \pm 0.0159$ & $0.8618 \pm 0.0218$ & $0.8398 \pm 0.0224$ & $0.7023 \pm 0.0177$ & $0.9147 \pm 0.0092$ & $0.9047 \pm 0.0124$ \\
+\textbf{Mamba+PrimaryCaps+MLP} & $\mathbf{0.8754 \pm 0.0097}$ & $\mathbf{0.8670 \pm 0.0158}$ & $\mathbf{0.8874 \pm 0.0192}$ & $\mathbf{0.8634 \pm 0.0208}$ & $\mathbf{0.7515 \pm 0.0191}$ & $\mathbf{0.9423 \pm 0.0061}$ & $\mathbf{0.9418 \pm 0.0075}$ \\
+Mamba+Attention Pool+MLP & $0.8602 \pm 0.0121$ & $0.8573 \pm 0.0196$ & $0.8647 \pm 0.0159$ & $0.8556 \pm 0.0233$ & $0.7207 \pm 0.0242$ & $0.9233 \pm 0.0110$ & $0.9292 \pm 0.0111$ \\
+Mean Pool+MLP & $0.7869 \pm 0.0075$ & $0.7840 \pm 0.0169$ & $0.7932 \pm 0.0238$ & $0.7806 \pm 0.0260$ & $0.5745 \pm 0.0149$ & $0.8584 \pm 0.0091$ & $0.8718 \pm 0.0090$ \\
+BiLSTM+MLP & $0.8501 \pm 0.0198$ & $0.8474 \pm 0.0259$ & $0.8549 \pm 0.0294$ & $0.8452 \pm 0.0320$ & $0.7009 \pm 0.0392$ & $0.9153 \pm 0.0186$ & $0.9177 \pm 0.0161$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\vspace{0.2cm}
+
+\begin{table*}[tb]
+\centering
+\caption{Five independent runs results on the Humans dataset (mean $\pm$ std). Best performance in bold.}
+\label{tab:humans}
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{3pt}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{p{4.6cm} c c c c c c c}
+\toprule
+\textbf{Architecture} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{Specificity} & \textbf{MCC} & \textbf{ROC-AUC} & \textbf{PR-AUC} \\
+\midrule
+Mamba+Capsule+Cross-Attn+MLP        & 0.9260$\pm$0.0048 & 0.9339$\pm$0.0051 & 0.9153$\pm$0.0145 & 0.9365$\pm$0.0061 & 0.8523$\pm$0.0094 & 0.9678$\pm$0.0026 & 0.9678$\pm$0.0050 \\
+Mamba+Cross-Attn+Capsule+MLP        & 0.9100$\pm$0.0096 & 0.9184$\pm$0.0107 & 0.8979$\pm$0.0169 & 0.9218$\pm$0.0113 & 0.8202$\pm$0.0191 & 0.9616$\pm$0.0041 & 0.9650$\pm$0.0022 \\
+Mamba+MLP                  &
+0.9266$\pm$0.0020 &
+0.9324$\pm$0.0079 &
+0.9183$\pm$0.0061 &
+0.9347$\pm$0.0086 &
+0.8533$\pm$0.0041 &
+0.9655$\pm$0.0045 &
+0.9662$\pm$0.0025 \\
+Mamba+Cross-Attn+MLP                & 0.9165$\pm$0.0063 & 0.9262$\pm$0.0059 & 0.9033$\pm$0.0149 & 0.9294$\pm$0.0067 & 0.8333$\pm$0.0122 & 0.9602$\pm$0.0045 & 0.9663$\pm$0.0040 \\
+Mamba+Capsule (Primary+Digit)+MLP   & 0.9260$\pm$0.0029 & 0.9282$\pm$0.0082 & 0.9219$\pm$0.0141 & 0.9300$\pm$0.0094 & 0.8522$\pm$0.0055 & 0.9678$\pm$0.0028 & 0.9693$\pm$0.0034 \\
+\textbf{Mamba+PrimaryCaps+MLP} &
+\textbf{0.9328$\pm$0.0054} &
+\textbf{0.9454$\pm$0.0157} &
+\textbf{0.9177$\pm$0.0142} &
+\textbf{0.9476$\pm$0.0166} &
+\textbf{0.8663$\pm$0.0110} &
+\textbf{0.9750$\pm$0.0028} &
+\textbf{0.9768$\pm$0.0019} \\
+Mamba+AttentionPool+MLP             & 0.9162$\pm$0.0093 & 0.9178$\pm$0.0070 & 0.9123$\pm$0.0141 & 0.9200$\pm$0.0066 & 0.8324$\pm$0.0186 & 0.9638$\pm$0.0034 & 0.9665$\pm$0.0037 \\
+MeanPool+MLP                        & 0.9239$\pm$0.0047 & 0.9352$\pm$0.0042 & 0.9093$\pm$0.0132 & 0.9382$\pm$0.0049 & 0.8482$\pm$0.0091 & 0.9675$\pm$0.0020 & 0.9703$\pm$0.0029 \\
+BiLSTM+MLP                          & 0.9248$\pm$0.0007 & 0.9279$\pm$0.0019 & 0.9195$\pm$0.0035 & 0.9300$\pm$0.0022 & 0.8496$\pm$0.0014 & 0.9707$\pm$0.0015 & 0.9736$\pm$0.0014 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\section{Ablation Studies}
+The variants in Tables~\ref{tab:drugbank}-- form a controlled
+ablation over the protein-side aggregation and fusion components, while the drug
+encoder, the training procedure, and the classifier are held fixed.
+
+The contribution of the Mamba encoder can be isolated by replacing it with a
+simple mean pooling of the PsePSSM features. This substitution lowers the
+ROC-AUC from 0.897 to 0.752 on DrugBank and from 0.942 to 0.858 on Enzyme, indicating that the selective state-space encoder
+yields a more discriminative representation than direct aggregation on all three
+datasets.
+
+The capsule layers provide dataset-dependent benefits. A primary capsule layer
+improves Enzyme (from 0.929 to 0.942), but adding both primary and digit capsule
+layers reduces performance. This suggests that primary capsules capture useful
+structural information, but routing-based digit capsules may be unnecessary for
+this task.
+
+Cross-attention shows modest benefits on the benchmark datasets, with performance gains varying across different data distributions. On DrugBank, cross-attention lowers performance (ROC-AUC from 0.897 to 0.815), while on other datasets its contribution is dataset-dependent.
+
+The choice of pooling has only a minor effect. Attention pooling does not improve
+on the simple mean pooling used in the default model: the two are comparable on
+Enzyme and Ion Channel, while mean pooling is somewhat better on DrugBank. This
+suggests that the Mamba encoder already captures most of the relevant
+information and that the final aggregation step is of secondary importance.
+
+\section{Discussion}
+The experiments support three observations. First, encoding the PsePSSM
+descriptor with a selective state-space block is consistently more effective than
+pooling it directly. Treating the 220 descriptor values as a sequence allows the
+Mamba block to model dependencies among the composition and sequence-order
+correlation terms, which a permutation-invariant mean ignores; the resulting
+gain over the mean-pooling baseline is observed on all three datasets. Because
+the block has linear-time complexity in the number of positions, this is achieved
+without the quadratic cost of self-attention.
+
+Second, the value of the additional fusion components depends on the dataset characteristics. Capsule layers show dataset-dependent benefits, with primary capsules improving performance on Enzyme while showing modest gains on others. Adding both primary and digit capsules increases variance across datasets. This pattern suggests that no single fusion mechanism is uniformly preferable, and that component choice should be guided by dataset properties and performance requirements.
+
+Third, fixed Morgan fingerprints provide a simple yet effective drug encoding
+that integrates well with the protein-side Mamba encoder. This design choice
+avoids the need for learned drug encoders while maintaining competitive
+performance.
+
+Several limitations should be noted. The PsePSSM descriptor is an abstracted,
+length-independent summary of the PSSM, so treating its 220 values as an ordered
+sequence is a modeling convenience rather than a reflection of true residue
+order, and per-residue resolution is not available to the encoder. The protein
+encoder is a single, vanilla Mamba block rather than a protein language model,
+and one short target required relaxing the PSI-BLAST E-value threshold to obtain
+any profile. Finally, evaluation uses stratified
+cross-validation on within-dataset pairs and does not include cold-start splits
+in which drugs or targets are unseen during training.
+
+\section{Conclusion}
+This work studied a selective state-space (Mamba) encoder for fixed-length
+PsePSSM evolutionary profiles in drug--target interaction prediction, paired with
+Morgan fingerprint drug encoding and a lightweight MLP classifier. Across six benchmark
+datasets (DrugBank, Enzyme, BioSNAP, C. elegans, BindingDB, Humans), the Mamba encoder
+consistently improved over a mean-pooling baseline. A controlled comparison of nine
+architectural variants showed that the benefit of capsule layers is dataset-dependent,
+with primary capsules achieving strong performance on Enzyme (ROC-AUC 0.942). Future work
+includes the use of raw-sequence or protein-language-model encoders that retain per-residue
+resolution and evaluation under cold-start splits.
+
+\begin{thebibliography}{00}
+\bibitem{ref_yamanishi} Y. Yamanishi, M. Araki, A. Gutteridge, W. Honda, and M.
+Kanehisa, ``Prediction of drug--target interaction networks from the integration
+of chemical and genomic spaces,'' \emph{Bioinformatics}, vol.~24, no.~13,
+pp.~i232--i240, 2008.
+\bibitem{ref_drugbank} D. S. Wishart et al., ``DrugBank: A knowledgebase for
+drugs, drug actions and drug targets,'' \emph{Nucleic Acids Res.}, vol.~36,
+no.~suppl.~1, pp.~D901--D906, 2008.
+\bibitem{ref_deepdta} H. \"Ozt\"urk, A. \"Ozg\"ur, and E. Ozkirimli, ``DeepDTA:
+Deep drug--target binding affinity prediction,'' \emph{Bioinformatics}, vol.~34,
+no.~17, pp.~i821--i829, 2018.
+\bibitem{ref_deepconvdti} I. Lee, J. Keum, and H. Nam, ``DeepConv-DTI: Prediction
+of drug--target interactions via deep learning with convolution on protein
+sequences,'' \emph{PLoS Comput. Biol.}, vol.~15, no.~6, 2019, Art.~no.~e1007129.
+\bibitem{ref_graphdta} T. Nguyen, H. Le, T. P. Quinn, T. Nguyen, T. D. Le, and S.
+Venkatesh, ``GraphDTA: Predicting drug--target binding affinity with graph neural
+networks,'' \emph{Bioinformatics}, vol.~37, no.~8, pp.~1140--1147, 2021.
+\bibitem{ref_moltrans} K. Huang, C. Xiao, L. M. Glass, and J. Sun, ``MolTrans:
+Molecular interaction transformer for drug--target interaction prediction,''
+\emph{Bioinformatics}, vol.~37, no.~6, pp.~830--836, 2021.
+\bibitem{ref_transformercpi} L. Chen et al., ``TransformerCPI: Improving
+compound--protein interaction prediction by sequence-based deep learning with
+self-attention mechanism and label reversal experiments,''
+\emph{Bioinformatics}, vol.~36, no.~16, pp.~4406--4414, 2020.
+\bibitem{ref_psiblast} S. F. Altschul, T. L. Madden, A. A. Sch\"affer, J. Zhang,
+Z. Zhang, W. Miller, and D. J. Lipman, ``Gapped BLAST and PSI-BLAST: A new
+generation of protein database search programs,'' \emph{Nucleic Acids Res.},
+vol.~25, no.~17, pp.~3389--3402, 1997.
+\bibitem{ref_psepssm} K.-C. Chou and H.-B. Shen, ``MemType-2L: A web server for
+predicting membrane proteins and their types by incorporating evolution
+information through Pse-PSSM,'' \emph{Biochem. Biophys. Res. Commun.}, vol.~360,
+no.~2, pp.~339--345, 2007.
+\bibitem{ref_mamba} A. Gu and T. Dao, ``Mamba: Linear-time sequence modeling with
+selective state spaces,'' 2023, arXiv:2312.00752. [Online]. Available:
+https://arxiv.org/abs/2312.00752
+\bibitem{ref_lstm} S. Hochreiter and J. Schmidhuber, ``Long short-term memory,''
+\emph{Neural Comput.}, vol.~9, no.~8, pp.~1735--1780, 1997.
+\bibitem{ref_vaswani} A. Vaswani et al., ``Attention is all you need,'' in
+\emph{Proc. Adv. Neural Inf. Process. Syst. (NeurIPS)}, 2017, pp.~5998--6008.
+\bibitem{ref_capsule} S. Sabour, N. Frosst, and G. E. Hinton, ``Dynamic routing
+between capsules,'' in \emph{Proc. Adv. Neural Inf. Process. Syst. (NeurIPS)},
+2017, pp.~3856--3866.
+\bibitem{ref_adam} D. P. Kingma and J. Ba, ``Adam: A method for stochastic
+optimization,'' in \emph{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2015.
+\end{thebibliography}
+
+\end{document}

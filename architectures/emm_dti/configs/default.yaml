@@ -1,0 +1,53 @@
+# Default configuration for EMM-DTI (Architecture Variant #10)
+# Standardized hyperparameters for fair comparison with 9 mamba-dti architectures
+# This serves as the base config; dataset-specific configs override these values
+
+dataset:
+  name: human
+  data_dir: data/human
+  train_split: 0.7
+  val_split: 0.2
+  test_split: 0.1
+  random_seed: 42
+
+model:
+  # FCS Embedding dimension
+  fcs_embedding_dim: 128
+
+  # Bidirectional Mamba-SSM configuration
+  mamba_hidden_dim: 256
+  mamba_n_layers: 2
+  mamba_state_size: 16
+  mamba_expand_factor: 2
+
+  # CNN prediction head
+  cnn_out_channels: 3
+  cnn_kernel_size: 3
+
+  # Regularization
+  dropout: 0.1
+
+training:
+  batch_size: 16
+  learning_rate: 0.0003
+  epochs: 200
+  early_stopping_patience: 30
+  device: cuda
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: false
+
+optimization:
+  optimizer: adam
+  weight_decay: 1.0e-04
+  gradient_clip: 1.0
+  warmup_steps: 0
+  lr_scheduler: none
+
+logging:
+  log_dir: results
+  log_level: INFO
+  tensorboard: true
+  wandb: false
+  wandb_project: emm-dti
+  save_interval: 5
