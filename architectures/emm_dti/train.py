@@ -354,8 +354,9 @@ def main():
     logger.info(f"Loaded: {len(drugs)} drugs, {len(proteins)} proteins, {len(interactions_df)} interactions")
     logger.info("")
 
-    # Check for pre-made splits
-    if "split" not in interactions_df.columns:
+    # Check for pre-made splits (must have valid/test splits)
+    has_premade_splits = "split" in interactions_df.columns and set(interactions_df["split"].unique()) > {"train"}
+    if not has_premade_splits:
         raise ValueError(
             f"Dataset '{args.dataset}' does not have pre-made train/valid/test splits.\n"
             f"Use train_cv.py for this dataset instead (5-fold stratified CV).\n"

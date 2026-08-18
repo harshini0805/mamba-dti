@@ -319,8 +319,8 @@ def main():
     logger.info(f"Loaded: {len(drugs)} drugs, {len(proteins)} proteins, {len(interactions_df)} interactions")
     logger.info("")
 
-    # Check if this dataset has pre-made splits
-    has_splits = "split" in interactions_df.columns
+    # Check if this dataset has pre-made splits (valid/test)
+    has_splits = "split" in interactions_df.columns and set(interactions_df["split"].unique()) > {"train"}
     if has_splits:
         raise ValueError(
             f"Dataset {args.dataset} has pre-made train/valid/test splits.\n"
